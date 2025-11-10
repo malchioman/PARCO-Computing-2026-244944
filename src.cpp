@@ -92,6 +92,13 @@ vector<float> matrixVectorMoltiplication(const coordinate& A,
     return y;
 }
 
+float vector_avarage(vector<float> v){
+    float total = 0.0f;
+    for (auto i = 0u; i < v.size(); i++){
+        total += v[i];
+    }
+    return total / v.size();
+}
 /*
 void printCoordinates(const coordinate& coordinate)
 {
@@ -146,27 +153,8 @@ int main() {
     auto A = matrixCreation(rng, rows, cols);
     auto x = vectorCreation(rng, cols);
     coordinate coordinate = matrixToCoordinates(A);
-    int n = omp_get_max_threads();
-    cout << "insert the number of threads that you wanna use, the max number of avaliable threads is: " << n << endl;
-    bool w = true;
-    int p;
-    while (w)
-    {
-        cin >> p;
-        if (p<=n){
-            w = false;
-        }else
-        {
-            cout << "insert a number that is smaller than " << n << endl;
-        }
-    }
-    omp_set_dynamic(0);
 
 
-
-    auto t0 = chrono::high_resolution_clock::now();
-    auto y = matrixVectorMoltiplication(coordinate, x, p);
-    auto t1 = chrono::high_resolution_clock::now();
     //printMatrix(A);
     //cout << "\n";
     //cout << "\n";
@@ -178,9 +166,136 @@ int main() {
     //cout << "\n";
     //printVector(y);
 
-    auto us = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
-    double ms = us / 1000.0;
-    cout << "moltiplication time: " << us << " us ("<< fixed << setprecision(3) << ms << " ms)\n";
+    /*
+    //====================================================================================
+    //FIRST EXPERIMENT -------- SAME MATRIX 50K x 50K BUT WITH DIFFERENT NUMBER OF THREADS
+    //====================================================================================
+
+
+    vector<float> time1;
+    vector<float> time2;
+    vector<float> time3;
+    vector<float> time4;
+    vector<float> time5;
+    vector<float> time6;
+    vector<float> time7;
+
+    for (int i = 0; i <= 10000; i++) {
+        int p1 = 1;
+        auto t0 = chrono::high_resolution_clock::now();
+        auto y1 = matrixVectorMoltiplication(coordinate, x, p1);
+        auto t1 = chrono::high_resolution_clock::now();
+
+        auto us1 = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
+        double ms1 = us1 / 1000.0;
+        time1.push_back(ms1);
+
+        int p2 = 2;
+        auto t2 = chrono::high_resolution_clock::now();
+        auto y2 = matrixVectorMoltiplication(coordinate, x, p2);
+        auto t3 = chrono::high_resolution_clock::now();
+
+        auto us2 = chrono::duration_cast<chrono::microseconds>(t3 - t2).count();
+        double ms2 = us2 / 1000.0;
+        time2.push_back(ms2);
+
+        int p3 = 4;
+        auto t4 = chrono::high_resolution_clock::now();
+        auto y3 = matrixVectorMoltiplication(coordinate, x, p3);
+        auto t5 = chrono::high_resolution_clock::now();
+
+        auto us3 = chrono::duration_cast<chrono::microseconds>(t5 - t4).count();
+        double ms3 = us3 / 1000.0;
+        time3.push_back(ms3);
+
+        int p4 = 8;
+        auto t6 = chrono::high_resolution_clock::now();
+        auto y4 = matrixVectorMoltiplication(coordinate, x, p4);
+        auto t7 = chrono::high_resolution_clock::now();
+
+        auto us4 = chrono::duration_cast<chrono::microseconds>(t7 - t6).count();
+        double ms4 = us4 / 1000.0;
+        time4.push_back(ms4);
+
+        int p5 = 12;
+        auto t8 = chrono::high_resolution_clock::now();
+        auto y5 = matrixVectorMoltiplication(coordinate, x, p5);
+        auto t9 = chrono::high_resolution_clock::now();
+
+        auto us5 = chrono::duration_cast<chrono::microseconds>(t9 - t8).count();
+        double ms5 = us5 / 1000.0;
+        time5.push_back(ms5);
+
+        int p6 = 16;
+        auto t10 = chrono::high_resolution_clock::now();
+        auto y6 = matrixVectorMoltiplication(coordinate, x, p6);
+        auto t11 = chrono::high_resolution_clock::now();
+
+        auto us6 = chrono::duration_cast<chrono::microseconds>(t11 - t10).count();
+        double ms6 = us6 / 1000.0;
+        time6.push_back(ms6);
+
+        int p7 = 20;
+        auto t12 = chrono::high_resolution_clock::now();
+        auto y7 = matrixVectorMoltiplication(coordinate, x, p7);
+        auto t13 = chrono::high_resolution_clock::now();
+
+        auto us7 = chrono::duration_cast<chrono::microseconds>(t13 - t12).count();
+        double ms7 = us7 / 1000.0;
+        time7.push_back(ms7);
+    }
+
+    float thread1 = vector_avarage(time1);
+    float thread2 = vector_avarage(time2);
+    float thread4 = vector_avarage(time3);
+    float thread8 = vector_avarage(time4);
+    float thread12 = vector_avarage(time5);
+    float thread16 = vector_avarage(time6);
+    float thread20 = vector_avarage(time7);
+
+    cout << thread1 << endl;
+    cout << thread2 << endl;
+    cout << thread4 << endl;
+    cout << thread8 << endl;
+    cout << thread12 << endl;
+    cout << thread16 << endl;
+    cout << thread20 << endl;
+    */
+
+
+    //=================================================================================================
+    //SECOND EXPERIMENT -------- DIFFERENT MATRIX SIZE, COMPARISON WITH 1 AND 20(max) NUMBER OF THREADS
+    //=================================================================================================
+
+    vector<float> time1;
+    vector<float> time7;
+
+    for (int i = 0; i < 1000; i++) {
+
+        int p1 = 1;
+        auto t0 = chrono::high_resolution_clock::now();
+        auto y1 = matrixVectorMoltiplication(coordinate, x, p1);
+        auto t1 = chrono::high_resolution_clock::now();
+
+        auto us1 = chrono::duration_cast<chrono::microseconds>(t1 - t0).count();
+        double ms1 = us1 / 1000.0;
+        time1.push_back(ms1);
+
+        int p7 = 20;
+        auto t12 = chrono::high_resolution_clock::now();
+        auto y7 = matrixVectorMoltiplication(coordinate, x, p7);
+        auto t13 = chrono::high_resolution_clock::now();
+
+        auto us7 = chrono::duration_cast<chrono::microseconds>(t13 - t12).count();
+        double ms7 = us7 / 1000.0;
+        time7.push_back(ms7);
+    }
+
+    float thread1 = vector_avarage(time1);
+    float thread7 = vector_avarage(time7);
+
+    cout << thread1 << endl;
+    cout << thread7 << endl;
 
     return 0;
 }
