@@ -128,49 +128,40 @@ int main(int argc, char** argv){
 
     // Nomi brevi richiesti
     {
-        std::cerr << "[+] reg_150k.mtx ...\n";
         CSR A = poisson1d(150000);
         write_mtx("matrices/reg_150k.mtx", A);
-        std::cerr << "    nnz="<<A.nnz()<<"\n";
+        std::cerr << "reg_150k.mtx created"<<"\n";
     }
     {
-        std::cerr << "[+] irreg_50k.mtx (k="<<k_irreg<<") ...\n";
         CSR A = random_sparse_k(50000, k_irreg);
         write_mtx("matrices/irreg_50k.mtx", A);
-        std::cerr << "    nnz~="<<A.nnz()<<"\n";
+        std::cerr << "irreg_50k.mtx created" <<"\n";
     }
     {
-        std::cerr << "[+] fem_5k.mtx ...\n";
         CSR A = random_sparse_exact_nnz(5154, 99199);
         write_mtx("matrices/fem_5k.mtx", A);
-        std::cerr << "    nnz="<<A.nnz()<<"\n";
+        std::cerr << "fem_5k.mtx created"<<"\n";
     }
     {
-        std::cerr << "[+] therm_1k.mtx ...\n";
         CSR A = random_sparse_exact_nnz(1228, 8598);
         write_mtx("matrices/therm_1k.mtx", A);
-        std::cerr << "    nnz="<<A.nnz()<<"\n";
+        std::cerr << "therm_1k.mtx created"<<"\n";
     }
     {
-        std::cerr << "[+] rail_4k.mtx ...\n";
         CSR A = random_sparse_exact_nnz(4284, 110000);
         write_mtx("matrices/rail_4k.mtx", A);
-        std::cerr << "    nnz="<<A.nnz()<<"\n";
+        std::cerr << "rail_4k.mtxn created" <<"\n";
     }
 
     if(add_social){
-        std::cerr << "[+] social_280k.mtx ...\n";
         CSR A = random_sparse_exact_nnz(281903, 2300000);
         write_mtx("matrices/social_280k.mtx", A);
-        std::cerr << "    nnz="<<A.nnz()<<"\n";
+        std::cerr << "social_280k.mtx created" << "\n";
     }
     if(add_web){
-        std::cerr << "[+] web_1M.mtx ...\n";
         CSR A = random_sparse_exact_nnz(1000005, 3100000);
         write_mtx("matrices/web_1M.mtx", A);
-        std::cerr << "    nnz="<<A.nnz()<<"\n";
+        std::cerr << "web_1M.mtx created" <<"\n";
     }
-
-    std::cerr << " file creati in ./matrices\n";
     return 0;
 }
