@@ -1,0 +1,3 @@
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/./bin/spmv_csr.exe
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/./bin/custom_matrix.exe
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/./bin/make_matrices.exe
