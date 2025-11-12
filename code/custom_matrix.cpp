@@ -9,6 +9,10 @@
     #include <sys/stat.h>
     #include <sys/types.h>
 #endif
+extern "C" {
+#include "mmio.h"
+}
+
 
 int main() {
     int rows = 10000, cols = 10000;
