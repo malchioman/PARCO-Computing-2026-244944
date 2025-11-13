@@ -1,1 +1,0 @@
- libmmio.a C:/msys64/ucrt64/lib/libgomp.dll.a C:/msys64/ucrt64/lib/libmingwthrd.a -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32 

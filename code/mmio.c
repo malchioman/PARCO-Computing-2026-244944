@@ -1,11 +1,3 @@
-/*
-*   Matrix Market I/O library for ANSI C
-*
-*   See http://math.nist.gov/MatrixMarket for details.
-*
-*
-*/
-
 
 #include <stdio.h>
 #include <string.h>
@@ -58,7 +50,7 @@ int mm_read_unsymmetric_sparse(const char *fname, int *M_, int *N_, int *nz_,
     *N_ = N;
     *nz_ = nz;
 
-    /* reseve memory for matrices */
+
 
     I = (int *) malloc(nz * sizeof(int));
     J = (int *) malloc(nz * sizeof(int));
@@ -67,10 +59,6 @@ int mm_read_unsymmetric_sparse(const char *fname, int *M_, int *N_, int *nz_,
     *val_ = val;
     *I_ = I;
     *J_ = J;
-
-    /* NOTE: when reading in doubles, ANSI C requires the use of the "l"  */
-    /*   specifier as in "%lg", "%lf", "%le", otherwise errors will occur */
-    /*  (ANSI C X3.159-1989, Sec. 4.9.6.2, p. 136 lines 13-15)            */
 
     for (i=0; i<nz; i++)
     {
@@ -118,19 +106,12 @@ int mm_read_banner(FILE *f, MM_typecode *matcode)
     for (p=data_type; *p!='\0'; *p=tolower(*p),p++);
     for (p=storage_scheme; *p!='\0'; *p=tolower(*p),p++);
 
-    /* check for banner */
     if (strncmp(banner, MatrixMarketBanner, strlen(MatrixMarketBanner)) != 0)
         return MM_NO_HEADER;
 
-    /* first field should be "mtx" */
     if (strcmp(mtx, MM_MTX_STR) != 0)
         return  MM_UNSUPPORTED_TYPE;
     mm_set_matrix(matcode);
-
-
-    /* second field describes whether this is a sparse matrix (in coordinate
-            storgae) or a dense array */
-
 
     if (strcmp(crd, MM_SPARSE_STR) == 0)
         mm_set_sparse(matcode);
@@ -139,9 +120,6 @@ int mm_read_banner(FILE *f, MM_typecode *matcode)
             mm_set_dense(matcode);
     else
         return MM_UNSUPPORTED_TYPE;
-
-
-    /* third field */
 
     if (strcmp(data_type, MM_REAL_STR) == 0)
         mm_set_real(matcode);
@@ -157,8 +135,6 @@ int mm_read_banner(FILE *f, MM_typecode *matcode)
     else
         return MM_UNSUPPORTED_TYPE;
 
-
-    /* fourth field */
 
     if (strcmp(storage_scheme, MM_GENERAL_STR) == 0)
         mm_set_general(matcode);
@@ -190,18 +166,15 @@ int mm_read_mtx_crd_size(FILE *f, int *M, int *N, int *nz )
 {
     char line[MM_MAX_LINE_LENGTH];
     int num_items_read;
-
-    /* set return null parameter values, in case we exit with errors */
     *M = *N = *nz = 0;
 
-    /* now continue scanning until you reach the end-of-comments */
     do
     {
         if (fgets(line,MM_MAX_LINE_LENGTH,f) == NULL)
             return MM_PREMATURE_EOF;
     }while (line[0] == '%');
 
-    /* line[] is either blank or has M,N, nz */
+
     if (sscanf(line, "%d %d %d", M, N, nz) == 3)
         return 0;
 
@@ -221,21 +194,18 @@ int mm_read_mtx_array_size(FILE *f, int *M, int *N)
 {
     char line[MM_MAX_LINE_LENGTH];
     int num_items_read;
-    /* set return null parameter values, in case we exit with errors */
+
     *M = *N = 0;
 
-    /* now continue scanning until you reach the end-of-comments */
     do
     {
         if (fgets(line,MM_MAX_LINE_LENGTH,f) == NULL)
             return MM_PREMATURE_EOF;
     }while (line[0] == '%');
 
-    /* line[] is either blank or has M,N, nz */
     if (sscanf(line, "%d %d", M, N) == 2)
         return 0;
 
-    else /* we have a blank line */
     do
     {
         num_items_read = fscanf(f, "%d %d", M, N);
@@ -255,80 +225,49 @@ int mm_write_mtx_array_size(FILE *f, int M, int N)
 }
 
 
-
-/*-------------------------------------------------------------------------*/
-
-/******************************************************************/
-/* use when I[], J[], and val[]J, and val[] are already allocated */
-/******************************************************************/
-
 int mm_read_mtx_crd_data(FILE *f, int M, int N, int nz, int I[], int J[],
-        double val[], MM_typecode matcode)
-{
+                         double val[], MM_typecode matcode) {
     int i;
-    if (mm_is_complex(matcode))
-    {
-        for (i=0; i<nz; i++)
-            if (fscanf(f, "%d %d %lg %lg", &I[i], &J[i], &val[2*i], &val[2*i+1])
-                != 4) return MM_PREMATURE_EOF;
-    }
-    else if (mm_is_real(matcode))
-    {
-        for (i=0; i<nz; i++)
-        {
+    if (mm_is_complex(matcode)) {
+        for (i = 0; i < nz; i++)
+            if (fscanf(f, "%d %d %lg %lg", &I[i], &J[i], &val[2 * i], &val[2 * i + 1])
+                != 4)
+                return MM_PREMATURE_EOF;
+    } else if (mm_is_real(matcode)) {
+        for (i = 0; i < nz; i++) {
             if (fscanf(f, "%d %d %lg\n", &I[i], &J[i], &val[i])
-                != 3) return MM_PREMATURE_EOF;
-
+                != 3)
+                return MM_PREMATURE_EOF;
         }
-    }
-
-    else if (mm_is_pattern(matcode))
-    {
-        for (i=0; i<nz; i++)
+    } else if (mm_is_pattern(matcode)) {
+        for (i = 0; i < nz; i++)
             if (fscanf(f, "%d %d", &I[i], &J[i])
-                != 2) return MM_PREMATURE_EOF;
-    }
-    else
+                != 2)
+                return MM_PREMATURE_EOF;
+    } else
         return MM_UNSUPPORTED_TYPE;
 
     return 0;
-
 }
 
 int mm_read_mtx_crd_entry(FILE *f, int *I, int *J,
-        double *real, double *imag, MM_typecode matcode)
-{
-    if (mm_is_complex(matcode))
-    {
-            if (fscanf(f, "%d %d %lg %lg", I, J, real, imag)
-                != 4) return MM_PREMATURE_EOF;
-    }
-    else if (mm_is_real(matcode))
-    {
-            if (fscanf(f, "%d %d %lg\n", I, J, real)
-                != 3) return MM_PREMATURE_EOF;
-
-    }
-
-    else if (mm_is_pattern(matcode))
-    {
-            if (fscanf(f, "%d %d", I, J) != 2) return MM_PREMATURE_EOF;
-    }
-    else
+                          double *real, double *imag, MM_typecode matcode) {
+    if (mm_is_complex(matcode)) {
+        if (fscanf(f, "%d %d %lg %lg", I, J, real, imag)
+            != 4)
+            return MM_PREMATURE_EOF;
+    } else if (mm_is_real(matcode)) {
+        if (fscanf(f, "%d %d %lg\n", I, J, real)
+            != 3)
+            return MM_PREMATURE_EOF;
+    } else if (mm_is_pattern(matcode)) {
+        if (fscanf(f, "%d %d", I, J) != 2) return MM_PREMATURE_EOF;
+    } else
         return MM_UNSUPPORTED_TYPE;
 
     return 0;
-
 }
 
-
-/************************************************************************
-    mm_read_mtx_crd()  fills M, N, nz, array of values, and return
-                        type code, e.g. 'MCRS'
-
-                        if matrix is complex, values[] is of size 2*nz,
-                            (nz pairs of real/imaginary values)
-************************************************************************/
 
 int mm_read_mtx_crd(char *fname, int *M, int *N, int *nz, int **I, int **J,
         double **val, MM_typecode *matcode)
@@ -408,14 +347,11 @@ int mm_write_mtx_crd(char fname[], int M, int N, int nz, int I[], int J[],
     if ((f = fopen(fname, "w")) == NULL)
         return MM_COULD_NOT_WRITE_FILE;
 
-    /* print banner followed by typecode */
     fprintf(f, "%s ", MatrixMarketBanner);
     fprintf(f, "%s\n", mm_typecode_to_str(matcode));
 
-    /* print matrix sizes and nonzeros */
     fprintf(f, "%d %d %d\n", M, N, nz);
 
-    /* print values */
     if (mm_is_pattern(matcode))
         for (i=0; i<nz; i++)
             fprintf(f, "%d %d\n", I[i], J[i]);
@@ -439,12 +375,6 @@ int mm_write_mtx_crd(char fname[], int M, int N, int nz, int I[], int J[],
     return 0;
 }
 
-
-/**
-*  Create a new copy of a string s.  mm_strdup() is a common routine, but
-*  not part of ANSI C, so it is included here.  Used by mm_typecode_to_str().
-*
-*/
 char *mm_strdup(const char *s)
 {
 	int len = strlen(s);
@@ -459,13 +389,13 @@ char  *mm_typecode_to_str(MM_typecode matcode)
 	char *mm_strdup(const char *);
     int error =0;
 
-    /* check for MTX type */
+
     if (mm_is_matrix(matcode))
         types[0] = MM_MTX_STR;
     else
         error=1;
 
-    /* check for CRD or ARR matrix */
+
     if (mm_is_sparse(matcode))
         types[1] = MM_SPARSE_STR;
     else
@@ -474,7 +404,6 @@ char  *mm_typecode_to_str(MM_typecode matcode)
     else
         return NULL;
 
-    /* check for element data type */
     if (mm_is_real(matcode))
         types[2] = MM_REAL_STR;
     else
@@ -489,8 +418,6 @@ char  *mm_typecode_to_str(MM_typecode matcode)
     else
         return NULL;
 
-
-    /* check for symmetry type */
     if (mm_is_general(matcode))
         types[3] = MM_GENERAL_STR;
     else

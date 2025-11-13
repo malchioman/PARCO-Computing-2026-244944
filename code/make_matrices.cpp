@@ -1,5 +1,4 @@
-// make_matrices.cpp
-// Genera matrici in formato Matrix Market (.mtx) con nomi brevi in ./matrices
+
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -9,11 +8,10 @@
 #include <set>
 #include <string>
 #include <vector>
-
+#include <filesystem>
 #ifdef _WIN32
-  #include <direct.h>
+#include <direct.h>
 #else
-  #include <sys/stat.h>
 #endif
 
 struct CSR {
@@ -46,7 +44,7 @@ static bool write_mtx(const std::string& path, const CSR& A){
     return true;
 }
 
-// --------- generatori ----------
+// --------- generator ----------
 static CSR poisson1d(int n){
     CSR A; A.n=A.m=n;
     A.row_ptr.resize(n+1);
@@ -63,7 +61,6 @@ static CSR poisson1d(int n){
     return A;
 }
 
-// random k-nnz per riga, valori N(0,1) + piccolo shift diag
 static CSR random_sparse_k(int n, int k, double diag_shift=1e-3){
     std::normal_distribution<double> N(0.0,1.0);
     std::uniform_int_distribution<int> U(0, n-1);
@@ -87,8 +84,6 @@ static CSR random_sparse_k(int n, int k, double diag_shift=1e-3){
         for(auto &e : rows[i]){ A.col_idx[p]=e.first; A.val[p]=e.second; ++p; }
     return A;
 }
-
-// costruisce una sparsa con nnz TOT esatto (tipo grafi/realistiche)
 static CSR random_sparse_exact_nnz(int n, int64_t nnz, bool force_diag=true){
     if(force_diag && nnz < n) nnz = n;
     std::uniform_int_distribution<int> U(0, n-1);
@@ -111,10 +106,11 @@ static CSR random_sparse_exact_nnz(int n, int64_t nnz, bool force_diag=true){
     return A;
 }
 
-// --------- main ----------
 int main(int argc, char** argv){
+    namespace fs = std::filesystem;
+
     bool add_social = false, add_web = false;
-    int k_irreg = 20; // nnz per riga per irreg_50k
+    int k_irreg = 20;
 
     for(int i=1;i<argc;i++){
         std::string s = argv[i];
@@ -124,43 +120,50 @@ int main(int argc, char** argv){
         else if(s.rfind("--k",0)==0){ k_irreg = std::stoi(s.substr(3)); }
     }
 
-    ensure_dir("matrices");
+    fs::path exe_path = fs::absolute(fs::path(argv[0]));
+    fs::path exe_dir  = exe_path.parent_path();
 
-    // Nomi brevi richiesti
+    fs::path matrices_dir = exe_dir / "matrices";
+    ensure_dir(matrices_dir.string());
+
+    auto mpath = [&](const char* name){
+        return (matrices_dir / name).string();
+    };
+
     {
         CSR A = poisson1d(150000);
-        write_mtx("matrices/reg_150k.mtx", A);
+        write_mtx(mpath("reg_150k.mtx"), A);
         std::cerr << "reg_150k.mtx created"<<"\n";
     }
     {
         CSR A = random_sparse_k(50000, k_irreg);
-        write_mtx("matrices/irreg_50k.mtx", A);
+        write_mtx(mpath("irreg_50k.mtx"), A);
         std::cerr << "irreg_50k.mtx created" <<"\n";
     }
     {
         CSR A = random_sparse_exact_nnz(5154, 99199);
-        write_mtx("matrices/fem_5k.mtx", A);
+        write_mtx(mpath("fem_5k.mtx"), A);
         std::cerr << "fem_5k.mtx created"<<"\n";
     }
     {
         CSR A = random_sparse_exact_nnz(1228, 8598);
-        write_mtx("matrices/therm_1k.mtx", A);
+        write_mtx(mpath("therm_1k.mtx"), A);
         std::cerr << "therm_1k.mtx created"<<"\n";
     }
     {
         CSR A = random_sparse_exact_nnz(4284, 110000);
-        write_mtx("matrices/rail_4k.mtx", A);
+        write_mtx(mpath("rail_4k.mtx"), A);
         std::cerr << "rail_4k.mtxn created" <<"\n";
     }
 
     if(add_social){
         CSR A = random_sparse_exact_nnz(281903, 2300000);
-        write_mtx("matrices/social_280k.mtx", A);
+        write_mtx(mpath("social_280k.mtx"), A);
         std::cerr << "social_280k.mtx created" << "\n";
     }
     if(add_web){
         CSR A = random_sparse_exact_nnz(1000005, 3100000);
-        write_mtx("matrices/web_1M.mtx", A);
+        write_mtx(mpath("web_1M.mtx"), A);
         std::cerr << "web_1M.mtx created" <<"\n";
     }
     return 0;

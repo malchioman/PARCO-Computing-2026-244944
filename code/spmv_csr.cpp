@@ -1,16 +1,3 @@
-// spmv_csr.cpp — OpenMP SpMV (CSR) con statistica al 90° percentile (P90)
-// Uso:  ./spmv_csr <matrix.mtx> <threads> [static|dynamic|guided] [chunk] [repeats] [trials]
-//
-// Compilazione (Windows / PowerShell):
-//   gcc -O3 -c mmio.c -o mmio.o
-//   g++ -O3 -march=native -fopenmp -std=c++17 spmv_csr.cpp mmio.o -o spmv_csr.exe
-//
-// Compilazione (Linux/macOS):
-//   gcc -O3 -c mmio.c -o mmio.o && g++ -O3 -march=native -fopenmp -std=c++17 spmv_csr.cpp mmio.o -o spmv_csr
-//
-// Note:
-// - Statistica principale: P90 (90° percentile) sui tempi di singole esecuzioni (repeats × trials).
-// - Stampa finale: threads, schedule(chunk), p90_ms, GFLOPS, GBps.
 
 #include <cstdio>
 #include <cstdlib>
@@ -27,7 +14,7 @@
 #include <omp.h>
 
 extern "C" {
-  #include "mmio.h"   // NIST Matrix Market I/O (linkare mmio.c)
+  #include "mmio.h"
 }
 
 using namespace std;
@@ -127,7 +114,7 @@ vector<float> matrixVectorMoltiplication(const CSR& A, const vector<float>& x,
         acc += A.val[k]*x[A.col[k]];
       y[i]=acc;
     }
-  } else { // static (default)
+  } else {
     #pragma omp parallel for schedule(static,chunk)
     for (int i=0;i<A.nrows;i++){
       float acc=0.0f;
@@ -139,18 +126,15 @@ vector<float> matrixVectorMoltiplication(const CSR& A, const vector<float>& x,
   return y;
 }
 
-// ---- calcolo P90 (90° percentile) sui tempi di singole esecuzioni ----
 static inline double percentile90_ms(const CSR& A, const vector<float>& x,
                                      const string& schedule, int chunk, int threads,
                                      int warmup, int repeats, int trials)
 {
   vector<float> y; y.reserve(A.nrows);
 
-  // Warmup: non misurato
   for (int w=0; w<warmup; ++w)
     y = matrixVectorMoltiplication(A,x,threads,schedule,chunk);
 
-  // Collezioniamo tempi individuali (repeats × trials)
   vector<double> samples; samples.reserve((size_t)repeats * (size_t)trials);
 
   for (int t=0; t<trials; ++t){
@@ -164,7 +148,6 @@ static inline double percentile90_ms(const CSR& A, const vector<float>& x,
 
   if (samples.empty()) return 0.0;
 
-  // P90: selezione in O(n) con nth_element
   size_t k = (size_t)ceil(0.90 * (double)samples.size());
   if (k == 0) k = 1;
   --k; // indice 0-based
@@ -180,16 +163,13 @@ int main(int argc, char** argv){
     return 1;
   }
 
-  // --- risoluzione path matrice ---
   string mtxArg = argv[1];
   string mtx = mtxArg;
 
-  // Se non esiste così com'è, prova dentro "matrices/" oppure nella cartella indicata
-  // da MATRICES_DIR (se settata).
   if (!file_exists(mtx)) {
-    const char* baseEnv = getenv("MATRICES_DIR");              // opzionale
+    const char* baseEnv = getenv("MATRICES_DIR");
     string base = baseEnv ? string(baseEnv) : string("matrices");
-    string candidate = base + "/" + mtxArg;                    // '/' funziona anche su Windows
+    string candidate = base + "/" + mtxArg;
     if (file_exists(candidate)) {
       mtx = candidate;
     } else {
@@ -202,8 +182,8 @@ int main(int argc, char** argv){
   const int    threads  = max(1, atoi(argv[2]));
   const string schedule = (argc>=4 ? string(argv[3]) : string("static"));
   const int    chunk    = (argc>=5 ? max(1, atoi(argv[4])) : 64);
-  const int    repeats  = (argc>=6 ? max(1, atoi(argv[5])) : 10); // default 10 (deliverable)
-  const int    trials   = (argc>=7 ? max(1, atoi(argv[6])) : 5);  // default 5
+  const int    repeats  = (argc>=6 ? max(1, atoi(argv[5])) : 10);
+  const int    trials   = (argc>=7 ? max(1, atoi(argv[6])) : 5);
   const int    warmup   = 2;
 
   CSR A = read_matrix_market_to_csr(mtx);
@@ -216,9 +196,8 @@ int main(int argc, char** argv){
   vector<float> x = make_random_x(A.ncols);
   double p90_ms = percentile90_ms(A, x, schedule, chunk, threads, warmup, repeats, trials);
 
-  // metriche derivate sul P90
   double gflops = (p90_ms>0) ? (2.0*nnz)/(p90_ms/1000.0)/1e9 : INFINITY;
-  double bytes  = nnz*(4.0+4.0+4.0) + A.nrows*4.0; // val(float)+col(int)+x(float) ~12B/nnz + rowptr footprint
+  double bytes  = nnz*(4.0+4.0+4.0) + A.nrows*4.0;
   double gbps   = (p90_ms>0) ? bytes/(p90_ms/1000.0)/1e9 : INFINITY;
 
   cout << fixed << setprecision(3)
