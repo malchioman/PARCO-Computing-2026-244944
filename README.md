@@ -73,6 +73,7 @@ mkdir build
 cd build      
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build .
+cd ..
 ```
 
 After building, executables will appear in:
@@ -88,6 +89,7 @@ mkdir build
 cd build
 cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
+cd ..
 ```
 
 Executables will be placed in:
@@ -290,19 +292,19 @@ These scripts are *optional* but useful for reproducible tests, in order to make
 #### Linux / macOS
 
 ```bash
-./runreg.sh    # Regular matrix, static scheduling
-./runirr.sh    # Irregular matrix, dynamic scheduling
-./seqreg.sh    # sequential matrix vectror multiplication with a regular matrix
-./seqirr.sh    # sequential matrix vectror multiplication with an irregular matrix
+./script/runreg.sh    # Regular matrix, static scheduling
+./script/runirr.sh    # Irregular matrix, dynamic scheduling
+./script/seqreg.sh    # sequential matrix vectror multiplication with a regular matrix
+./script/seqirr.sh    # sequential matrix vectror multiplication with an irregular matrix
 ```
 
 #### Windows (PowerShell)
 
 ```powershell
-.\runreg.ps1
-.\runirr.ps1
-.\seqreg.ps1   
-.\seqreg.ps1   
+.\script\runreg.ps1
+.\script\runirr.ps1
+.\script\seqreg.ps1   
+.\script\seqreg.ps1   
 ```
 ---
 
