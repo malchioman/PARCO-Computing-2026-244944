@@ -1,0 +1,8 @@
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/CMakeFiles/mmio.dir
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/CMakeFiles/spmv_csr.dir
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/CMakeFiles/custom_matrix.dir
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/CMakeFiles/make_matrices.dir
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/CMakeFiles/PACKAGE.dir
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/CMakeFiles/INSTALL.dir
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/CMakeFiles/ALL_BUILD.dir
+C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/CMakeFiles/ZERO_CHECK.dir

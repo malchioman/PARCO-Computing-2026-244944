@@ -1,2 +1,0 @@
-C:\msys64\ucrt64\bin\ar.exe qc libmmio.a CMakeFiles/mmio.dir/code/mmio.c.obj
-C:\msys64\ucrt64\bin\ranlib.exe libmmio.a
