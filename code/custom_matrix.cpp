@@ -25,7 +25,7 @@ int main() {
     mkdir("matrices", 0755);
 #endif
 
-    FILE *f = fopen("matrices/large_random.mtx", "w");
+    FILE *f = fopen("matrices/custom.mtx", "w");
     if (!f) {
         perror("Errore apertura file");
         return 1;
