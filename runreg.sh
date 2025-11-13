@@ -5,7 +5,7 @@
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Percorsi relativi
-EXE="$SCRIPT_DIR/bin/spmv_csr.exe"
+EXE="$SCRIPT_DIR/bin/spmv_csr"
 MAT="$SCRIPT_DIR/bin/matrices/reg_150k.mtx"
 
 # Numero di thread (default 20)

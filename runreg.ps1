@@ -9,7 +9,7 @@ param(
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 # Percorsi relativi
-$Exe = Join-Path $ScriptDir "bin\spmv_csr.exe"
+$Exe = Join-Path $ScriptDir "bin\spmv_csr"
 $Mat = Join-Path $ScriptDir "bin\matrices\reg_150k.mtx"
 
 
