@@ -1,4 +1,3 @@
-
 #include <algorithm>
 #include <cmath>
 #include <fstream>
@@ -9,10 +8,6 @@
 #include <string>
 #include <vector>
 #include <filesystem>
-#ifdef _WIN32
-#include <direct.h>
-#else
-#endif
 
 struct CSR {
     int n=0, m=0;
@@ -24,13 +19,15 @@ struct CSR {
 
 static std::mt19937_64& rng(){ static std::mt19937_64 g(42); return g; }
 
-static void ensure_dir(const std::string& d){
-#ifdef _WIN32
-    _mkdir(d.c_str());
-#else
-    mkdir(d.c_str(), 0755);
-#endif
+static void ensure_dir(const std::string& d) {
+    std::error_code ec;
+    std::filesystem::create_directories(d, ec);
+    if (ec) {
+        std::cerr << "[x] error creating directory " << d
+                  << ": " << ec.message() << "\n";
+    }
 }
+
 
 static bool write_mtx(const std::string& path, const CSR& A){
     std::ofstream f(path);
