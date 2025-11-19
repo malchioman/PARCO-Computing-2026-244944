@@ -329,6 +329,20 @@ Parameters:
 | `[repeats]`             | Optional: number of inner repetitions                |
 | `[trials]`              | Optional: independent trials (P90 computed over all) |
 
+
+### Numerical validation
+
+At the beginning of each run, `spmv_csr` performs a numerical validation step:
+the OpenMP result is compared against a single-thread CSR reference
+implementation. Two metrics are reported on `stderr`:
+
+- `rel_L2_err` – relative L2 error ‖y_par − y_ref‖₂ / ‖y_ref‖₂
+- `max_abs_err` – maximum absolute difference maxᵢ |y_par[i] − y_ref[i]|
+
+This check runs once per execution and is not included in the timing loop
+used to compute P90, GFLOP/s, and GB/s. For the matrices used in the report,
+both errors are identically zero in single precision.
+
 #### Example commands
 
 ```bash
