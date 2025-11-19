@@ -41,7 +41,7 @@ static bool write_mtx(const std::string& path, const CSR& A){
     return true;
 }
 
-// --------- generator ----------
+// generator
 static CSR poisson1d(int n){
     CSR A; A.n=A.m=n;
     A.row_ptr.resize(n+1);
@@ -81,6 +81,7 @@ static CSR random_sparse_k(int n, int k, double diag_shift=1e-3){
         for(auto &e : rows[i]){ A.col_idx[p]=e.first; A.val[p]=e.second; ++p; }
     return A;
 }
+
 static CSR random_sparse_exact_nnz(int n, int64_t nnz, bool force_diag=true){
     if(force_diag && nnz < n) nnz = n;
     std::uniform_int_distribution<int> U(0, n-1);

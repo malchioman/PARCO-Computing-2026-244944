@@ -1,4 +1,3 @@
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
@@ -90,9 +89,21 @@ vector<float> make_random_x(int n){
   return x;
 }
 
-vector<float> matrixVectorMoltiplication(const CSR& A, const vector<float>& x,
-                                         int threads, const string& schedule, int chunk)
+vector<float> spmv_csr_serial(const CSR& A, const vector<float>& x)
 {
+  vector<float> y(A.nrows, 0.0f);
+  for (int i = 0; i < A.nrows; ++i) {
+    float acc = 0.0f;
+    for (int k = A.rowptr[i]; k < A.rowptr[i+1]; ++k) {
+      acc += A.val[k] * x[A.col[k]];
+    }
+    y[i] = acc;
+  }
+  return y;
+}
+
+vector<float> matrixVectorMoltiplication(const CSR& A, const vector<float>& x, int threads, const string& schedule, int chunk){
+
   vector<float> y(A.nrows, 0.0f);
   omp_set_dynamic(0);
   omp_set_num_threads(max(1,threads));
@@ -126,9 +137,43 @@ vector<float> matrixVectorMoltiplication(const CSR& A, const vector<float>& x,
   return y;
 }
 
-static inline double percentile90_ms(const CSR& A, const vector<float>& x,
-                                     const string& schedule, int chunk, int threads,
-                                     int warmup, int repeats, int trials)
+static inline void validate_spmv(const CSR& A, const vector<float>& x, int threads, const string& schedule, int chunk)
+{
+
+  vector<float> y_ref = spmv_csr_serial(A, x);
+  // risultato parallelo con la stessa configurazione
+  vector<float> y_par = matrixVectorMoltiplication(A, x, threads, schedule, chunk);
+
+  long double diff2 = 0.0L;
+  long double ref2  = 0.0L;
+  long double max_abs = 0.0L;
+
+  const int m = A.nrows;
+  for (int i = 0; i < m; ++i) {
+    long double yr = (long double)y_ref[i];
+    long double yp = (long double)y_par[i];
+    long double d  = yp - yr;
+    diff2 += d * d;
+    ref2  += yr * yr;
+    long double ad = fabsl(d);
+    if (ad > max_abs) max_abs = ad;
+  }
+
+  long double rel = (ref2 > 0.0L) ? sqrtl(diff2 / ref2) : sqrtl(diff2);
+
+  // Stampa su stderr per non toccare il formato dei risultati su stdout
+  auto old_prec = cerr.precision();
+  auto old_flags = cerr.flags();
+
+  cerr.setf(ios::scientific, ios::floatfield);
+  cerr << "validation: rel_L2_err=" << (long double)rel
+       << "  max_abs_err=" << max_abs << "\n";
+
+  cerr.flags(old_flags);
+  cerr.precision(old_prec);
+}
+
+static inline double percentile90_ms(const CSR& A, const vector<float>& x, const string& schedule, int chunk, int threads,int warmup, int repeats, int trials)
 {
   vector<float> y; y.reserve(A.nrows);
 
@@ -194,6 +239,10 @@ int main(int argc, char** argv){
        << " trials=" << trials << "  (report=P90)\n";
 
   vector<float> x = make_random_x(A.ncols);
+
+  //numeric validation (one time each execution)
+  validate_spmv(A, x, threads, schedule, chunk);
+
   double p90_ms = percentile90_ms(A, x, schedule, chunk, threads, warmup, repeats, trials);
 
   double gflops = (p90_ms>0) ? (2.0*nnz)/(p90_ms/1000.0)/1e9 : INFINITY;
