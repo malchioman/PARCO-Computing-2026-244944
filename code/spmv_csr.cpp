@@ -1,6 +1,6 @@
 #include <cstdio>
 #include <cstdlib>
-#include <cstdint>
+#include <sstream>
 #include <cstring>
 #include <cmath>
 #include <iostream>
@@ -10,6 +10,8 @@
 #include <random>
 #include <chrono>
 #include <iomanip>
+#include <fstream>
+#include <filesystem>
 #include <omp.h>
 
 extern "C" {
@@ -17,6 +19,7 @@ extern "C" {
 }
 
 using namespace std;
+namespace fs = std::filesystem;
 
 struct CSR {
   int nrows = 0, ncols = 0;
@@ -24,10 +27,17 @@ struct CSR {
   vector<int>   col;
   vector<float> val;
 };
+struct ValidationResult {
+  long double rel_L2_error;
+  long double max_abs_error;
+};
 
-static inline string lower_copy(string s){ for (auto& c:s) c=(char)tolower(c); return s; }
+static string lower_copy(string s){
+  for (auto& c : s) c = (char)tolower(c);
+  return s;
+}
 
-static inline bool file_exists(const string& p) {
+static bool file_exists(const string& p) {
   FILE* f = fopen(p.c_str(), "r");
   if (f) { fclose(f); return true; }
   return false;
@@ -35,56 +45,80 @@ static inline bool file_exists(const string& p) {
 
 CSR read_matrix_market_to_csr(const string& path){
   FILE* f = fopen(path.c_str(), "r");
-  if (!f){ cerr<<"[fatal] cannot open "<<path<<"\n"; exit(1); }
+  if (!f){
+    cerr << "[fatal] cannot open " << path << "\n";
+    exit(1);
+  }
 
   MM_typecode matcode;
-  if (mm_read_banner(f, &matcode) != 0){ cerr<<"[fatal] mm_read_banner\n"; exit(1); }
+  if (mm_read_banner(f, &matcode) != 0){
+    cerr << "[fatal] mm_read_banner\n";
+    exit(1);
+  }
   if (!mm_is_matrix(matcode) || !mm_is_coordinate(matcode)){
-    cerr<<"[fatal] only 'matrix coordinate' files supported\n"; exit(1);
+    cerr << "[fatal] only 'matrix coordinate' files supported\n";
+    exit(1);
   }
 
-  int M,N,nnz_file;
+  int M, N, nnz_file;
   if (mm_read_mtx_crd_size(f, &M, &N, &nnz_file) != 0){
-    cerr<<"[fatal] mm_read_mtx_crd_size\n"; exit(1);
+    cerr << "[fatal] mm_read_mtx_crd_size\n";
+    exit(1);
   }
 
-  vector<int> Ii; Ii.reserve(nnz_file * (mm_is_symmetric(matcode)? 2:1));
-  vector<int> Jj; Jj.reserve(Ii.capacity());
+  vector<int>   Ii; Ii.reserve(nnz_file * (mm_is_symmetric(matcode) ? 2 : 1));
+  vector<int>   Jj; Jj.reserve(Ii.capacity());
   vector<float> Vv; Vv.reserve(Ii.capacity());
 
-  for (int k=0;k<nnz_file;k++){
-    int i,j; double v;
+  for (int k = 0; k < nnz_file; ++k){
+    int i, j; double v;
     if (mm_is_pattern(matcode)){
-      if (fscanf(f, "%d %d", &i,&j) != 2){
-        cerr<<"[fatal] bad entry\n"; exit(1);
+      if (fscanf(f, "%d %d", &i, &j) != 2){
+        cerr << "[fatal] bad entry\n";
+        exit(1);
       }
       v = 1.0;
     } else if (mm_is_real(matcode) || mm_is_integer(matcode)){
-      if (fscanf(f, "%d %d %lf", &i,&j,&v) != 3){
-        cerr<<"[fatal] bad entry\n"; exit(1);
+      if (fscanf(f, "%d %d %lf", &i, &j, &v) != 3){
+        cerr << "[fatal] bad entry\n";
+        exit(1);
       }
     } else {
-      cerr<<"[fatal] unsupported data type (complex)\n"; exit(1);
+      cerr << "[fatal] unsupported data type (complex)\n";
+      exit(1);
     }
 
-    Ii.push_back(i-1); Jj.push_back(j-1); Vv.push_back((float)v);
-    if (mm_is_symmetric(matcode) && i!=j){
-      Ii.push_back(j-1); Jj.push_back(i-1); Vv.push_back((float)v);
+    Ii.push_back(i-1);
+    Jj.push_back(j-1);
+    Vv.push_back((float)v);
+    if (mm_is_symmetric(matcode) && i != j){
+      Ii.push_back(j-1);
+      Jj.push_back(i-1);
+      Vv.push_back((float)v);
     }
   }
   fclose(f);
 
   const int nnz = (int)Vv.size();
-  CSR A; A.nrows=M; A.ncols=N; A.rowptr.assign(M+1,0);
+  CSR A;
+  A.nrows = M;
+  A.ncols = N;
+  A.rowptr.assign(M+1, 0);
 
-  for (int k=0;k<nnz;k++) A.rowptr[Ii[k]+1]++;
-  for (int r=0;r<M;r++)   A.rowptr[r+1] += A.rowptr[r];
+  for (int k = 0; k < nnz; ++k)
+    A.rowptr[Ii[k] + 1]++;
 
-  A.col.assign(nnz,0); A.val.assign(nnz,0.0f);
+  for (int r = 0; r < M; ++r)
+    A.rowptr[r + 1] += A.rowptr[r];
+
+  A.col.assign(nnz, 0);
+  A.val.assign(nnz, 0.0f);
   vector<int> next = A.rowptr;
-  for (int k=0;k<nnz;k++){
-    int r = Ii[k]; int p = next[r]++;
-    A.col[p]=Jj[k]; A.val[p]=Vv[k];
+  for (int k = 0; k < nnz; ++k){
+    int r = Ii[k];
+    int p = next[r]++;
+    A.col[p] = Jj[k];
+    A.val[p] = Vv[k];
   }
   return A;
 }
@@ -93,7 +127,7 @@ vector<float> make_random_x(int n){
   mt19937 rng(42);
   normal_distribution<float> g(0.0f, 10.0f);
   vector<float> x(n);
-  for (auto& e: x) e = g(rng);
+  for (auto& e : x) e = g(rng);
   return x;
 }
 
@@ -110,47 +144,42 @@ vector<float> spmv_csr_serial(const CSR& A, const vector<float>& x)
   return y;
 }
 
-// clearer name:
-vector<float> matrixVectorMultiplication(const CSR& A, const vector<float>& x,
-                                         int threads, const string& schedule,
-                                         int chunk)
-{
+// parallel SpMV multiplication
+vector<float> matrixVectorMultiplication(const CSR& A, const vector<float>& x, int threads, const string& schedule, int chunk){
   vector<float> y(A.nrows, 0.0f);
   omp_set_dynamic(0);
-  omp_set_num_threads(max(1,threads));
+  omp_set_num_threads(max(1, threads));
   const string s = lower_copy(schedule);
 
-  if (s=="dynamic"){
-    #pragma omp parallel for schedule(dynamic,chunk)
-    for (int i=0;i<A.nrows;i++){
-      float acc=0.0f;
-      for (int k=A.rowptr[i]; k<A.rowptr[i+1]; ++k)
-        acc += A.val[k]*x[A.col[k]];
-      y[i]=acc;
+  if (s == "dynamic"){
+    #pragma omp parallel for schedule(dynamic, chunk)
+    for (int i = 0; i < A.nrows; ++i){
+      float acc = 0.0f;
+      for (int k = A.rowptr[i]; k < A.rowptr[i+1]; ++k)
+        acc += A.val[k] * x[A.col[k]];
+      y[i] = acc;
     }
-  } else if (s=="guided"){
-    #pragma omp parallel for schedule(guided,chunk)
-    for (int i=0;i<A.nrows;i++){
-      float acc=0.0f;
-      for (int k=A.rowptr[i]; k<A.rowptr[i+1]; ++k)
-        acc += A.val[k]*x[A.col[k]];
-      y[i]=acc;
+  } else if (s == "guided"){
+    #pragma omp parallel for schedule(guided, chunk)
+    for (int i = 0; i < A.nrows; ++i){
+      float acc = 0.0f;
+      for (int k = A.rowptr[i]; k < A.rowptr[i+1]; ++k)
+        acc += A.val[k] * x[A.col[k]];
+      y[i] = acc;
     }
   } else {
-    #pragma omp parallel for schedule(static,chunk)
-    for (int i=0;i<A.nrows;i++){
-      float acc=0.0f;
-      for (int k=A.rowptr[i]; k<A.rowptr[i+1]; ++k)
-        acc += A.val[k]*x[A.col[k]];
-      y[i]=acc;
+    #pragma omp parallel for schedule(static, chunk)
+    for (int i = 0; i < A.nrows; ++i){
+      float acc = 0.0f;
+      for (int k = A.rowptr[i]; k < A.rowptr[i+1]; ++k)
+        acc += A.val[k] * x[A.col[k]];
+      y[i] = acc;
     }
   }
   return y;
 }
 
-static inline void validate_spmv(const CSR& A, const vector<float>& x,
-                                 int threads, const string& schedule, int chunk)
-{
+static ValidationResult validate_spmv(const CSR& A, const vector<float>& x, int threads, const string& schedule, int chunk){
   vector<float> y_ref = spmv_csr_serial(A, x);
   vector<float> y_par = matrixVectorMultiplication(A, x, threads, schedule, chunk);
 
@@ -171,33 +200,25 @@ static inline void validate_spmv(const CSR& A, const vector<float>& x,
 
   long double rel = (ref2 > 0.0L) ? sqrtl(diff2 / ref2) : sqrtl(diff2);
 
-  auto old_prec  = cerr.precision();
-  auto old_flags = cerr.flags();
-
-  cerr.setf(ios::scientific, ios::floatfield);
-  cerr << "[validation] relative_L2_error = " << (long double)rel
-       << "   max_absolute_error = " << max_abs << "\n";
-
-  cerr.flags(old_flags);
-  cerr.precision(old_prec);
+  ValidationResult res;
+  res.rel_L2_error  = rel;
+  res.max_abs_error = max_abs;
+  return res;
 }
 
-static inline double percentile90_ms(const CSR& A, const vector<float>& x,
-                                     const string& schedule, int chunk,
-                                     int threads,int warmup,
-                                     int repeats, int trials)
-{
+static double percentile90_ms(const CSR& A, const vector<float>& x, const string& schedule, int chunk, int threads, int warmup, int repeats, int trials){
   vector<float> y; y.reserve(A.nrows);
 
-  for (int w=0; w<warmup; ++w)
-    y = matrixVectorMultiplication(A,x,threads,schedule,chunk);
+  for (int w = 0; w < warmup; ++w)
+    y = matrixVectorMultiplication(A, x, threads, schedule, chunk);
 
-  vector<double> samples; samples.reserve((size_t)repeats * (size_t)trials);
+  vector<double> samples;
+  samples.reserve((size_t)repeats * (size_t)trials);
 
-  for (int t=0; t<trials; ++t){
-    for (int r=0; r<repeats; ++r){
+  for (int t = 0; t < trials; ++t){
+    for (int r = 0; r < repeats; ++r){
       auto t0 = chrono::high_resolution_clock::now();
-      y = matrixVectorMultiplication(A,x,threads,schedule,chunk);
+      y = matrixVectorMultiplication(A, x, threads, schedule, chunk);
       auto t1 = chrono::high_resolution_clock::now();
       samples.push_back( chrono::duration<double, milli>(t1 - t0).count() );
     }
@@ -208,8 +229,8 @@ static inline double percentile90_ms(const CSR& A, const vector<float>& x,
   size_t k = (size_t)ceil(0.90 * (double)samples.size());
   if (k == 0) k = 1;
   --k; // 0-based index
-  nth_element(samples.begin(), samples.begin()+k, samples.end());
-  volatile float sink = (y.empty()? 0.0f : y[0]); (void)sink;
+  nth_element(samples.begin(), samples.begin() + k, samples.end());
+  volatile float sink = (y.empty() ? 0.0f : y[0]); (void)sink;
   return samples[k];
 }
 
@@ -221,7 +242,7 @@ int main(int argc, char** argv){
   }
 
   string mtxArg = argv[1];
-  string mtx = mtxArg;
+  string mtx    = mtxArg;
 
   if (!file_exists(mtx)) {
     const char* baseEnv = getenv("MATRICES_DIR");
@@ -237,14 +258,30 @@ int main(int argc, char** argv){
   }
 
   const int    threads  = max(1, atoi(argv[2]));
-  const string schedule = (argc>=4 ? string(argv[3]) : string("static"));
-  const int    chunk    = (argc>=5 ? max(1, atoi(argv[4])) : 64);
-  const int    repeats  = (argc>=6 ? max(1, atoi(argv[5])) : 10);
-  const int    trials   = (argc>=7 ? max(1, atoi(argv[6])) : 5);
+  const string schedule = (argc >= 4 ? string(argv[3]) : string("static"));
+  const int    chunk    = (argc >= 5 ? max(1, atoi(argv[4])) : 64);
+  const int    repeats  = (argc >= 6 ? max(1, atoi(argv[5])) : 10);
+  const int    trials   = (argc >= 7 ? max(1, atoi(argv[6])) : 5);
   const int    warmup   = 2;
 
   CSR A = read_matrix_market_to_csr(mtx);
   const long long nnz = (long long)A.val.size();
+
+  vector<float> x = make_random_x(A.ncols);
+
+  // Validation
+  ValidationResult vres = validate_spmv(A, x, threads, schedule, chunk);
+
+  // timing with p90
+  double p90_ms = percentile90_ms(A, x, schedule, chunk, threads,
+                                  warmup, repeats, trials);
+
+  double gflops = (p90_ms > 0) ? (2.0 * nnz) / (p90_ms / 1000.0) / 1e9 : INFINITY;
+  double bytes  = nnz * (4.0 + 4.0 + 4.0) + A.nrows * 4.0;
+  double gbps   = (p90_ms > 0) ? bytes / (p90_ms / 1000.0) / 1e9 : INFINITY;
+
+  // output
+  cout << fixed << setprecision(3);
 
   cout << "\n=================================================================\n";
   cout << "                 SpMV Benchmark (CSR + OpenMP)\n";
@@ -264,24 +301,78 @@ int main(int argc, char** argv){
   cout << "  Number of trials     : " << trials << "\n";
   cout << "  Time metric          : 90th percentile (P90)\n\n";
 
-  vector<float> x = make_random_x(A.ncols);
+  // validation on screen
+  {
+    auto old_prec  = cerr.precision();
+    auto old_flags = cerr.flags();
 
-  validate_spmv(A, x, threads, schedule, chunk);
+    cerr.setf(ios::scientific, ios::floatfield);
+    cerr << "[validation] relative_L2_error = " << vres.rel_L2_error
+         << "   max_absolute_error = " << vres.max_abs_error << "\n";
 
-  double p90_ms = percentile90_ms(A, x, schedule, chunk, threads,
-                                  warmup, repeats, trials);
+    cerr.flags(old_flags);
+    cerr.precision(old_prec);
+  }
 
-  double gflops = (p90_ms>0) ? (2.0*nnz)/(p90_ms/1000.0)/1e9 : INFINITY;
-  double bytes  = nnz*(4.0+4.0+4.0) + A.nrows*4.0;
-  double gbps   = (p90_ms>0) ? bytes/(p90_ms/1000.0)/1e9 : INFINITY;
-
-  cout << "RESULTS\n";
-  cout << fixed << setprecision(3);
+  cout << "\nRESULTS\n";
   cout << "  P90 execution time   : " << p90_ms << " ms\n";
   cout << "  Throughput           : " << gflops << " GFLOPS\n";
   cout << "  Estimated bandwidth  : " << gbps << " GB/s\n\n";
-
   cout << "=================================================================\n\n";
+
+  //writing on result file
+  try {
+    fs::path cwd = fs::current_path();
+    fs::path project_root = (cwd.filename() == "bin") ? cwd.parent_path() : cwd;
+
+    fs::path results_dir = project_root / "results";
+    fs::create_directories(results_dir);
+
+    fs::path log_path = results_dir / "spmv_results.txt";
+
+    bool write_header = !fs::exists(log_path);
+
+    ofstream fout(log_path, ios::app);
+    if (!fout) {
+      cerr << "[warning] Could not write results to: " << log_path << "\n";
+    } else {
+
+      if (write_header) {
+        fout << "SpMV CSR Benchmark - Run Log\n\n";
+      }
+
+      // Timestamp
+      auto now   = chrono::system_clock::now();
+      time_t t_c = chrono::system_clock::to_time_t(now);
+      std::tm* tm = std::localtime(&t_c);
+
+      // Validation string
+      std::ostringstream validation_line;
+      validation_line.setf(std::ios::scientific, std::ios::floatfield);
+      validation_line << "rel_L2_error=" << (long double)vres.rel_L2_error
+                      << ", max_abs_error=" << (long double)vres.max_abs_error;
+
+      fout << "=================================================================\n";
+      fout << "Run at " << put_time(tm, "%Y-%m-%d %H:%M:%S") << "\n";
+      fout << "Matrix    : " << mtx
+           << " (" << A.nrows << " x " << A.ncols
+           << ", nnz = " << nnz << ")\n";
+      fout << "Config    : threads=" << threads
+           << ", schedule=" << lower_copy(schedule)
+           << "(chunk=" << chunk << ")"
+           << ", warmup=" << warmup
+           << ", repeats=" << repeats
+           << ", trials=" << trials << "\n";
+      fout << "Validation: " << validation_line.str() << "\n";
+      fout << fixed << setprecision(3);
+      fout << "Results   : p90_ms=" << p90_ms
+           << ", GFLOPS=" << gflops
+           << ", GBps=" << gbps << "\n";
+      fout << "=================================================================\n\n";
+    }
+  } catch (const std::exception& e) {
+    cerr << "[warning] Exception while writing results file: " << e.what() << "\n";
+  }
 
   return 0;
 }
