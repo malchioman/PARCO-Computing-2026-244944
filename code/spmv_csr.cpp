@@ -44,7 +44,9 @@ CSR read_matrix_market_to_csr(const string& path){
   }
 
   int M,N,nnz_file;
-  if (mm_read_mtx_crd_size(f, &M, &N, &nnz_file) != 0){ cerr<<"[fatal] mm_read_mtx_crd_size\n"; exit(1); }
+  if (mm_read_mtx_crd_size(f, &M, &N, &nnz_file) != 0){
+    cerr<<"[fatal] mm_read_mtx_crd_size\n"; exit(1);
+  }
 
   vector<int> Ii; Ii.reserve(nnz_file * (mm_is_symmetric(matcode)? 2:1));
   vector<int> Jj; Jj.reserve(Ii.capacity());
@@ -53,11 +55,17 @@ CSR read_matrix_market_to_csr(const string& path){
   for (int k=0;k<nnz_file;k++){
     int i,j; double v;
     if (mm_is_pattern(matcode)){
-      if (fscanf(f, "%d %d", &i,&j) != 2){ cerr<<"[fatal] bad entry\n"; exit(1); }
+      if (fscanf(f, "%d %d", &i,&j) != 2){
+        cerr<<"[fatal] bad entry\n"; exit(1);
+      }
       v = 1.0;
     } else if (mm_is_real(matcode) || mm_is_integer(matcode)){
-      if (fscanf(f, "%d %d %lf", &i,&j,&v) != 3){ cerr<<"[fatal] bad entry\n"; exit(1); }
-    } else { cerr<<"[fatal] unsupported data type (complex)\n"; exit(1); }
+      if (fscanf(f, "%d %d %lf", &i,&j,&v) != 3){
+        cerr<<"[fatal] bad entry\n"; exit(1);
+      }
+    } else {
+      cerr<<"[fatal] unsupported data type (complex)\n"; exit(1);
+    }
 
     Ii.push_back(i-1); Jj.push_back(j-1); Vv.push_back((float)v);
     if (mm_is_symmetric(matcode) && i!=j){
@@ -102,8 +110,11 @@ vector<float> spmv_csr_serial(const CSR& A, const vector<float>& x)
   return y;
 }
 
-vector<float> matrixVectorMoltiplication(const CSR& A, const vector<float>& x, int threads, const string& schedule, int chunk){
-
+// clearer name:
+vector<float> matrixVectorMultiplication(const CSR& A, const vector<float>& x,
+                                         int threads, const string& schedule,
+                                         int chunk)
+{
   vector<float> y(A.nrows, 0.0f);
   omp_set_dynamic(0);
   omp_set_num_threads(max(1,threads));
@@ -137,12 +148,11 @@ vector<float> matrixVectorMoltiplication(const CSR& A, const vector<float>& x, i
   return y;
 }
 
-static inline void validate_spmv(const CSR& A, const vector<float>& x, int threads, const string& schedule, int chunk)
+static inline void validate_spmv(const CSR& A, const vector<float>& x,
+                                 int threads, const string& schedule, int chunk)
 {
-
   vector<float> y_ref = spmv_csr_serial(A, x);
-  // risultato parallelo con la stessa configurazione
-  vector<float> y_par = matrixVectorMoltiplication(A, x, threads, schedule, chunk);
+  vector<float> y_par = matrixVectorMultiplication(A, x, threads, schedule, chunk);
 
   long double diff2 = 0.0L;
   long double ref2  = 0.0L;
@@ -161,31 +171,33 @@ static inline void validate_spmv(const CSR& A, const vector<float>& x, int threa
 
   long double rel = (ref2 > 0.0L) ? sqrtl(diff2 / ref2) : sqrtl(diff2);
 
-  // Stampa su stderr per non toccare il formato dei risultati su stdout
-  auto old_prec = cerr.precision();
+  auto old_prec  = cerr.precision();
   auto old_flags = cerr.flags();
 
   cerr.setf(ios::scientific, ios::floatfield);
-  cerr << "validation: rel_L2_err=" << (long double)rel
-       << "  max_abs_err=" << max_abs << "\n";
+  cerr << "[validation] relative_L2_error = " << (long double)rel
+       << "   max_absolute_error = " << max_abs << "\n";
 
   cerr.flags(old_flags);
   cerr.precision(old_prec);
 }
 
-static inline double percentile90_ms(const CSR& A, const vector<float>& x, const string& schedule, int chunk, int threads,int warmup, int repeats, int trials)
+static inline double percentile90_ms(const CSR& A, const vector<float>& x,
+                                     const string& schedule, int chunk,
+                                     int threads,int warmup,
+                                     int repeats, int trials)
 {
   vector<float> y; y.reserve(A.nrows);
 
   for (int w=0; w<warmup; ++w)
-    y = matrixVectorMoltiplication(A,x,threads,schedule,chunk);
+    y = matrixVectorMultiplication(A,x,threads,schedule,chunk);
 
   vector<double> samples; samples.reserve((size_t)repeats * (size_t)trials);
 
   for (int t=0; t<trials; ++t){
     for (int r=0; r<repeats; ++r){
       auto t0 = chrono::high_resolution_clock::now();
-      y = matrixVectorMoltiplication(A,x,threads,schedule,chunk);
+      y = matrixVectorMultiplication(A,x,threads,schedule,chunk);
       auto t1 = chrono::high_resolution_clock::now();
       samples.push_back( chrono::duration<double, milli>(t1 - t0).count() );
     }
@@ -195,7 +207,7 @@ static inline double percentile90_ms(const CSR& A, const vector<float>& x, const
 
   size_t k = (size_t)ceil(0.90 * (double)samples.size());
   if (k == 0) k = 1;
-  --k; // indice 0-based
+  --k; // 0-based index
   nth_element(samples.begin(), samples.begin()+k, samples.end());
   volatile float sink = (y.empty()? 0.0f : y[0]); (void)sink;
   return samples[k];
@@ -233,28 +245,43 @@ int main(int argc, char** argv){
 
   CSR A = read_matrix_market_to_csr(mtx);
   const long long nnz = (long long)A.val.size();
-  cerr << "Loaded " << mtx << "  (" << A.nrows << "x" << A.ncols
-       << ", nnz=" << nnz << ")\n";
-  cerr << "measure: warmup=" << warmup << " repeats=" << repeats
-       << " trials=" << trials << "  (report=P90)\n";
+
+  cout << "\n=================================================================\n";
+  cout << "                 SpMV Benchmark (CSR + OpenMP)\n";
+  cout << "=================================================================\n\n";
+
+  cout << "MATRIX INFO\n";
+  cout << "  File                 : " << mtx << "\n";
+  cout << "  Dimensions           : " << A.nrows << " x " << A.ncols << "\n";
+  cout << "  Non-zero entries     : " << nnz << "\n\n";
+
+  cout << "BENCHMARK SETTINGS\n";
+  cout << "  Threads              : " << threads << "\n";
+  cout << "  Schedule             : " << lower_copy(schedule)
+       << " (chunk = " << chunk << ")\n";
+  cout << "  Warmup runs          : " << warmup << "\n";
+  cout << "  Repeats per trial    : " << repeats << "\n";
+  cout << "  Number of trials     : " << trials << "\n";
+  cout << "  Time metric          : 90th percentile (P90)\n\n";
 
   vector<float> x = make_random_x(A.ncols);
 
-  //numeric validation (one time each execution)
   validate_spmv(A, x, threads, schedule, chunk);
 
-  double p90_ms = percentile90_ms(A, x, schedule, chunk, threads, warmup, repeats, trials);
+  double p90_ms = percentile90_ms(A, x, schedule, chunk, threads,
+                                  warmup, repeats, trials);
 
   double gflops = (p90_ms>0) ? (2.0*nnz)/(p90_ms/1000.0)/1e9 : INFINITY;
   double bytes  = nnz*(4.0+4.0+4.0) + A.nrows*4.0;
   double gbps   = (p90_ms>0) ? bytes/(p90_ms/1000.0)/1e9 : INFINITY;
 
-  cout << fixed << setprecision(3)
-       << "threads="  << threads
-       << "  schedule=" << lower_copy(schedule) << "(" << chunk << ")"
-       << "  p90_ms=" << p90_ms
-       << "  GFLOPS="  << gflops
-       << "  GBps="    << gbps
-       << "\n";
+  cout << "RESULTS\n";
+  cout << fixed << setprecision(3);
+  cout << "  P90 execution time   : " << p90_ms << " ms\n";
+  cout << "  Throughput           : " << gflops << " GFLOPS\n";
+  cout << "  Estimated bandwidth  : " << gbps << " GB/s\n\n";
+
+  cout << "=================================================================\n\n";
+
   return 0;
 }
