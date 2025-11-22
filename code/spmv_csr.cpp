@@ -242,17 +242,53 @@ int main(int argc, char** argv){
   }
 
   string mtxArg = argv[1];
-  string mtx    = mtxArg;
+  string mtx = mtxArg;
 
+  // Try path as given
   if (!file_exists(mtx)) {
+
+    //  Try MATRICES_DIR if environment variable exists
     const char* baseEnv = getenv("MATRICES_DIR");
-    string base = baseEnv ? string(baseEnv) : string("matrices");
-    string candidate = base + "/" + mtxArg;
-    if (file_exists(candidate)) {
-      mtx = candidate;
-    } else {
-      cerr << "[fatal] cannot open '" << mtxArg
-           << "' nor '" << candidate << "'\n";
+    if (baseEnv) {
+      string candidate = string(baseEnv) + "/" + mtxArg;
+      if (file_exists(candidate)) {
+        mtx = candidate;
+      } else {
+      }
+    }
+
+    // Try "matrices/<file>"
+    if (!file_exists(mtx)) {
+      string candidate = "matrices/" + mtxArg;
+      if (file_exists(candidate)) {
+        mtx = candidate;
+      }
+    }
+
+    // Try "bin/matrices/<file>"
+    if (!file_exists(mtx)) {
+      string candidate = "bin/matrices/" + mtxArg;
+      if (file_exists(candidate)) {
+        mtx = candidate;
+      }
+    }
+
+    // Try "<current_dir>/../bin/matrices/<file>" (in case run from ./bin/)
+    if (!file_exists(mtx)) {
+      string candidate = "../bin/matrices/" + mtxArg;
+      if (file_exists(candidate)) {
+        mtx = candidate;
+      }
+    }
+
+    // only if still not found
+    if (!file_exists(mtx)) {
+      cerr << "[fatal] cannot open '" << mtxArg << "' in any of the expected locations:\n"
+           << "  - " << mtxArg << "\n"
+           << "  - matrices/" << mtxArg << "\n"
+           << "  - bin/matrices/" << mtxArg << "\n"
+           << "  - ../bin/matrices/" << mtxArg << "\n"
+           << "  - $MATRICES_DIR/" << mtxArg << " (if set)\n";
       return 1;
     }
   }
