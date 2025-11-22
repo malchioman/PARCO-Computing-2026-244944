@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="C:\Users\Massimo\Documents\GitHub\PARCO-Computing-2026-244944\build\CMakeFiles\8b97ba9ac94b5eeff2657b4c031bb22d\PACKAGE_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{7E9657E0-296A-31CA-B51D-09C79B731824}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

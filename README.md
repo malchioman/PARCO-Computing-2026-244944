@@ -306,6 +306,26 @@ These scripts are *optional* but useful for reproducible tests, in order to make
 .\script\seqreg.ps1   
 .\script\seqreg.ps1   
 ```
+
+### Script Execution Permissions on HPC Clusters
+
+When accessing some HPC clusters or shared Linux environments, the shell scripts included in the repository may not have execution permissions immediately after cloning the project.  
+If running a script results in a **“Permission denied”** error, for example:
+
+```bash
+./script/runreg.sh
+```
+you must first grant execution rights. To make all scripts executable at once, run:
+
+```bash
+chmod +x script/*.sh
+```
+Alternatively, you can enable individual scripts:
+
+```bash
+chmod +x script/runreg.sh script/runirr.sh script/seqreg.sh script/seqirr.sh
+```
+After setting the permissions, all scripts will run normally using the commands shown in this README.
 ---
 
 ### Running the Main Executable (`spmv_csr`)
