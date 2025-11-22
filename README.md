@@ -349,6 +349,39 @@ Parameters:
 | `[repeats]`             | Optional: number of inner repetitions                |
 | `[trials]`              | Optional: independent trials (P90 computed over all) |
 
+### Output Logging (Automatic Result Saving)
+
+Each execution of `spmv_csr` produces two complementary outputs:
+
+1. **On-screen benchmark report**  
+   A detailed human-readable summary is printed to the terminal at the end of each run.  
+   It includes:
+  - matrix information (size and number of nonzeros)
+  - OpenMP configuration (threads, schedule, chunk size)
+  - timing settings (warmup, repeats, trials)
+  - validation metrics
+  - P90 execution time, GFLOP/s, and bandwidth
+
+2. **Automatic persistent logging**  
+   Every run also appends a compact summary of the results to the file:
+```
+results/spmv_results.txt
+```
+
+The program automatically creates the `results/` directory and the log file if they do not exist.
+
+Each entry in the log file contains a timestamp and a concise five-line summary, for example:
+```
+=================================================================
+Run at 2025-11-22 15:42:10
+Matrix : matrices/irreg_50k.mtx (50000 x 50000, nnz = 1000000)
+Config : threads=20, schedule=dynamic(chunk=64), warmup=2, repeats=10, trials=5
+Validation: rel_L2_error=1.23e-08, max_abs_error=3.45e-07
+Results : p90_ms=0.123, GFLOPS=0.004, GBps=0.050
+=================================================================
+```
+This log file makes it easy to track and compare multiple experiments without needing to copy terminal output manually. It is especially useful for instructors, reproducibility, or automated batch testing.
+
 
 ### Numerical validation
 
