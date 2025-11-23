@@ -358,8 +358,10 @@ int main(int argc, char** argv){
 
   //writing on result file
   try {
-    fs::path cwd = fs::current_path();
-    fs::path project_root = (cwd.filename() == "bin") ? cwd.parent_path() : cwd;
+
+    fs::path exe_path = fs::canonical(argv[0]);
+    fs::path project_root = exe_path.parent_path().parent_path();
+
 
     fs::path results_dir = project_root / "results";
     fs::create_directories(results_dir);
