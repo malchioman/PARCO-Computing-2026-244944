@@ -75,6 +75,10 @@ Load a recent GCC / G++ compiler (recommended)
 ```bash
 module load gcc91    # or any version with full C++17 support
 ```
+Alternatively: load Clang / LLVM (if preferred)
+```bash
+module load clang/14.0.6
+```
 After loading the required modules, the build process works normally:
 
 ---
