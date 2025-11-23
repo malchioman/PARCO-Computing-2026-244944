@@ -53,6 +53,32 @@ To build and run the project you need:
 
 ---
 
+### Building on HPC / University Cluster (CMake and Compilers)
+
+On some HPC systems (including the UniTN cluster), the default software
+environment may not provide sufficiently recent versions of CMake or the C/C++
+compilers required to build this project.  
+If you encounter errors such as:
+````
+CMake 3.15 or newer is required
+C++17 is not supported by the default compiler
+The 'cc' or 'g++' command is not available
+````
+
+you must first load the appropriate modules.
+
+#### Load a recent CMake version 
+```bash
+module load cmake-3.15.4   # or any version ≥ 3.15
+````
+Load a recent GCC / G++ compiler (recommended)
+```bash
+module load gcc91    # or any version with full C++17 support
+```
+After loading the required modules, the build process works normally:
+
+---
+
 ### Clone the Repository
 
 ```bash
