@@ -1,0 +1,10 @@
+^C:\USERS\MASSIMO\DOCUMENTS\GITHUB\PARCO-COMPUTING-2026-244944\BUILD\CMAKEFILES\8B97BA9AC94B5EEFF2657B4C031BB22D\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944 -BC:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/build/PARCO_Computing_2026_244944.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
