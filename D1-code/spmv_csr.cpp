@@ -15,7 +15,7 @@
 #include <omp.h>
 
 extern "C" {
-  #include "mmio.h"
+  #include "../mmio/mmio.h"
 }
 
 using namespace std;
