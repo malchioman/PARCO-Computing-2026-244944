@@ -2,7 +2,7 @@
 #include <cstdlib>
 #include <random>
 #include <filesystem>   // <=== aggiunto
-#include "mmio.h"
+#include "../mmio/mmio.h"
 
 #ifdef _WIN32
     #include <direct.h>
@@ -12,7 +12,7 @@
 #endif
 
 extern "C" {
-#include "mmio.h"
+#include "../mmio/mmio.h"
 }
 
 int main(int argc, char** argv) {
