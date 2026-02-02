@@ -9,9 +9,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Default to Release if single-config (Makefiles, Ninja)
-if(NOT CMAKE_CONFIGURATION_TYPES)
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
+
+# Build toggles
+option(PARCO_BUILD_OMP "Build OpenMP targets (Deliverable 1)" ON)
+option(PARCO_BUILD_MPI "Build MPI target (Deliverable 2)" ON)
 
 # ============================================================
 # Locate Deliverable 1 source dir robustly (code or D1-code)
@@ -76,98 +80,81 @@ add_library(mmio STATIC "${MMIO_DIR}/mmio.c")
 target_include_directories(mmio PUBLIC "${MMIO_DIR}")
 
 # ============================================================
-# OpenMP (for D1 spmv_csr)
+# Helper: enable OpenMP manually (robust on clusters)
 # ============================================================
 function(parco_enable_openmp tgt)
   if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${tgt} PRIVATE -fopenmp)
     target_link_options(${tgt} PRIVATE -fopenmp)
   elseif (MSVC)
-    target_compile_options(${tgt} PRIVATE $<$<CONFIG:Release>:/openmp>)
+    # /openmp works for MSVC; keep it Release-only if you want
+    target_compile_options(${tgt} PRIVATE /openmp)
   endif()
 endfunction()
 
+# ============================================================
+# Helper: common release flags
+# ============================================================
+function(parco_release_flags tgt)
+  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${tgt} PRIVATE -O3 -march=native)
+  elseif (MSVC)
+    target_compile_options(${tgt} PRIVATE $<$<CONFIG:Release>:/O2>)
+  endif()
+endfunction()
 
 # ============================================================
-# Deliverable 1 targets
+# Deliverable 1 targets (OpenMP)
 # ============================================================
-
-# ---- spmv_csr ----
 add_executable(spmv_csr "${CODE_DIR}/spmv_csr.cpp")
 target_link_libraries(spmv_csr PRIVATE mmio)
+parco_release_flags(spmv_csr)
 
-if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  target_compile_options(spmv_csr PRIVATE -O3 -march=native)
-  if (OpenMP_CXX_FOUND)
-    target_link_libraries(spmv_csr PRIVATE OpenMP::OpenMP_CXX)
-  else()
-    target_compile_options(spmv_csr PRIVATE -fopenmp)
-    target_link_options(spmv_csr PRIVATE -fopenmp)
-  endif()
-elseif (MSVC)
-  target_compile_options(spmv_csr PRIVATE
-          $<$<CONFIG:Release>:/O2>
-          $<$<CONFIG:Release>:/openmp>
-  )
-  if (OpenMP_CXX_FOUND)
-    target_link_libraries(spmv_csr PRIVATE OpenMP::OpenMP_CXX)
-  endif()
+if (PARCO_BUILD_OMP)
+  parco_enable_openmp(spmv_csr)
 endif()
 
 # ---- custom_matrix ----
 if (EXISTS "${CODE_DIR}/custom_matrix.cpp")
   add_executable(custom_matrix "${CODE_DIR}/custom_matrix.cpp")
   target_link_libraries(custom_matrix PRIVATE mmio)
+  parco_release_flags(custom_matrix)
 
   if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(custom_matrix PRIVATE -O2 -Wno-write-strings)
-  elseif (MSVC)
-    target_compile_options(custom_matrix PRIVATE $<$<CONFIG:Release>:/O2>)
+    target_compile_options(custom_matrix PRIVATE -Wno-write-strings)
   endif()
 else()
-  message(WARNING "custom_matrix.cpp not found in ${CODE_DIR}; target custom_matrix will NOT be built.")
+  message(STATUS "custom_matrix.cpp not found in ${CODE_DIR}; target custom_matrix will be skipped.")
 endif()
 
 # ---- make_matrices ----
 if (EXISTS "${CODE_DIR}/make_matrices.cpp")
   add_executable(make_matrices "${CODE_DIR}/make_matrices.cpp")
-
-  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(make_matrices PRIVATE -O2)
-  elseif (MSVC)
-    target_compile_options(make_matrices PRIVATE $<$<CONFIG:Release>:/O2>)
-  endif()
+  parco_release_flags(make_matrices)
 else()
-  message(WARNING "make_matrices.cpp not found in ${CODE_DIR}; target make_matrices will NOT be built.")
+  message(STATUS "make_matrices.cpp not found in ${CODE_DIR}; target make_matrices will be skipped.")
 endif()
 
 # ============================================================
-# Deliverable 2 — MPI-only (optional)
+# Deliverable 2 — MPI target (NO FindMPI, wrapper-based)
 # Expected file at: D2-code/spmv_mpi.cpp
 # ============================================================
-option(PARCO_BUILD_MPI "Build Deliverable 2 MPI target (spmv_mpi)" ON)
-
 if (PARCO_BUILD_MPI)
   set(D2_DIR "${CMAKE_SOURCE_DIR}/D2-code")
   set(D2_SRC "${D2_DIR}/spmv_mpi.cpp")
 
   if (EXISTS "${D2_SRC}")
-    find_package(MPI QUIET)
-    if (MPI_FOUND)
-      add_executable(spmv_mpi "${D2_SRC}")
-      target_link_libraries(spmv_mpi PRIVATE mmio MPI::MPI_CXX)
+    add_executable(spmv_mpi "${D2_SRC}")
+    target_link_libraries(spmv_mpi PRIVATE mmio)
+    parco_release_flags(spmv_mpi)
 
-      if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(spmv_mpi PRIVATE -O3 -march=native)
-      elseif (MSVC)
-        target_compile_options(spmv_mpi PRIVATE $<$<CONFIG:Release>:/O2>)
-      endif()
-    else()
-      message(WARNING
-              "MPI not found: spmv_mpi target will NOT be built. "
-              "On Windows disable it with -DPARCO_BUILD_MPI=OFF."
-      )
-    endif()
+    # If later you make MPI+OpenMP hybrid, just enable this:
+    # if (PARCO_BUILD_OMP)
+    #   parco_enable_openmp(spmv_mpi)
+    # endif()
+
+    message(STATUS "D2 target enabled: spmv_mpi (wrapper-based MPI, no FindMPI)")
+    message(STATUS "NOTE: build with mpicxx to get MPI includes/libs automatically.")
   else()
     message(STATUS "D2 source not found (${D2_SRC}); spmv_mpi target will be skipped.")
   endif()
