@@ -78,7 +78,15 @@ target_include_directories(mmio PUBLIC "${MMIO_DIR}")
 # ============================================================
 # OpenMP (for D1 spmv_csr)
 # ============================================================
-find_package(OpenMP QUIET)
+function(parco_enable_openmp tgt)
+  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${tgt} PRIVATE -fopenmp)
+    target_link_options(${tgt} PRIVATE -fopenmp)
+  elseif (MSVC)
+    target_compile_options(${tgt} PRIVATE $<$<CONFIG:Release>:/openmp>)
+  endif()
+endfunction()
+
 
 # ============================================================
 # Deliverable 1 targets
