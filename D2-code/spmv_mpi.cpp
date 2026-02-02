@@ -185,7 +185,9 @@ static void append_results_rank0(const std::string& matrix_path,
                                  double max_abs)
 {
     try {
-        fs::path results_dir = fs::path("results");
+        // ✅ Scrive SEMPRE nel root del repo anche se lanci da bin/
+        // eseguibile è in bin/ -> results è in ../results
+        fs::path results_dir = fs::path("..") / "results";
         fs::create_directories(results_dir);
 
         fs::path log_path = results_dir / "spmv_mpi_results.txt";
@@ -225,6 +227,7 @@ static void append_results_rank0(const std::string& matrix_path,
         }
 
         fout << "=================================================================\n\n";
+
     } catch (const std::exception& e) {
         std::cerr << "[warning] Exception while writing results file: " << e.what() << "\n";
     }
@@ -326,7 +329,7 @@ int main(int argc, char** argv) {
 
     // -------- Build x (baseline: x=1) and broadcast --------
     std::vector<double> x(N, 1.0);
-    MPI_Bcast(x.data(), N, MPI_DOUBLE, 0, MPI_COMM_WORLD); // trivial but ok
+    MPI_Bcast(x.data(), N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
     // -------- SpMV iterations & timing (measure only SpMV compute) --------
     std::vector<double> y_local;
@@ -394,7 +397,6 @@ int main(int argc, char** argv) {
 
         double gflops = (max_time > 0.0) ? (2.0 * (double)nz) / max_time / 1e9 : 0.0;
 
-        // Serial validation
         bool has_validation = false;
         double rel_L2 = 0.0, max_abs = 0.0;
 
@@ -424,7 +426,7 @@ int main(int argc, char** argv) {
         append_results_rank0(path, M, N, nz, P, iters, max_time, gflops,
                              has_validation, rel_L2, max_abs);
 
-        std::cout << "[Rank0] Results appended to results/spmv_mpi_results.txt\n";
+        std::cout << "[Rank0] Results appended to ../results/spmv_mpi_results.txt\n";
     }
 
     MPI_Type_free(&MPI_COO);
