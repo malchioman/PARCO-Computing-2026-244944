@@ -1,6 +1,10 @@
 #!/bin/bash
 set -e
 
+# INIZIALIZZA I MODULES (QUESTA ERA LA PARTE MANCANTE)
+source /etc/profile
+source /etc/profile.d/modules.sh
+
 module purge
 module load gcc91
 module load openmpi-3.0.0--gcc-9.1.0
