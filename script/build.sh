@@ -24,8 +24,12 @@ export OMPI_CXX=/apps/gcc-9.1.0/local/bin/g++-9.1.0
     -DCMAKE_CXX_COMPILER=mpic++ \
     -DPARCO_BUILD_MPI=ON \
     -DPARCO_BUILD_OMP=ON \
-    -DPARCO_MARCH_NATIVE=OFF
+    -DPARCO_MARCH_NATIVE=OFF \
+    -DPARCO_FETCH_DATASETS=ON
   cmake --build build -j
+
+  # opzionale: scarica dataset strong scaling (non fallire se non c'è internet)
+  cmake --build build --target dataset_kron_g500_logn21 || true
 )
 
 echo
@@ -34,5 +38,4 @@ echo "Ambiente MPI/OMP caricato."
 echo "Ora puoi usare mpirun direttamente."
 echo
 
-# sostituisce la shell corrente con una nuova che eredita l'ambiente
 exec bash
