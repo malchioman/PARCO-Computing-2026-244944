@@ -3,35 +3,15 @@ cmake_minimum_required(VERSION 3.15)
 project(PARCO_Computing_2026_244944 LANGUAGES C CXX)
 
 # ============================================================
-# Build toggles
+# Base settings
 # ============================================================
-option(PARCO_BUILD_OMP "Build OpenMP targets (Deliverable 1)" ON)
-option(PARCO_BUILD_MPI "Build MPI target (Deliverable 2)" ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Su cluster: -march=native è rischioso (login != compute)
-option(PARCO_MARCH_NATIVE "Enable -march=native (NOT recommended on clusters)" OFF)
-
-# Dataset download targets (optional)
-option(PARCO_FETCH_DATASETS "Enable dataset download targets" ON)
-
-# Default Release (generator single-config)
-if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+# Default to Release if single-config (Makefiles, Ninja)
+if(NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
-
-# ============================================================
-# Output directories (bin/)
-# ============================================================
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
-
-foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
-  string(TOUPPER ${cfg} CFG_UP)
-  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CFG_UP} "${CMAKE_SOURCE_DIR}/bin")
-  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CFG_UP} "${CMAKE_SOURCE_DIR}/bin")
-  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CFG_UP} "${CMAKE_SOURCE_DIR}/bin")
-endforeach()
 
 # ============================================================
 # Locate Deliverable 1 source dir robustly (code or D1-code)
@@ -55,6 +35,7 @@ if (CODE_DIR STREQUAL "")
           "Expected spmv_csr.cpp inside one of:\n"
           "  - ${CMAKE_SOURCE_DIR}/code\n"
           "  - ${CMAKE_SOURCE_DIR}/D1-code\n"
+          "Fix: rename your D1 folder or update CODE_DIR_CANDIDATES."
   )
 endif()
 
@@ -66,203 +47,157 @@ message(STATUS "Deliverable 1 CODE_DIR = ${CODE_DIR}")
 set(MMIO_DIR "${CMAKE_SOURCE_DIR}/mmio")
 if(NOT EXISTS "${MMIO_DIR}/mmio.c" OR NOT EXISTS "${MMIO_DIR}/mmio.h")
   message(FATAL_ERROR
-          "mmio not found.\nExpected mmio/mmio.c and mmio/mmio.h at repo root."
+          "mmio not found.\n"
+          "Expected:\n"
+          "  - ${MMIO_DIR}/mmio.c\n"
+          "  - ${MMIO_DIR}/mmio.h\n"
+          "Fix: ensure mmio.c and mmio.h are in the 'mmio' folder at repo root."
   )
 endif()
 
+# ============================================================
+# Output directories (bin/)
+# ============================================================
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
+
+foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+  string(TOUPPER ${cfg} CFG_UP)
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CFG_UP} "${CMAKE_SOURCE_DIR}/bin")
+  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CFG_UP} "${CMAKE_SOURCE_DIR}/bin")
+  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CFG_UP} "${CMAKE_SOURCE_DIR}/bin")
+endforeach()
+
+# ============================================================
+# Common C library (mmio)
+# ============================================================
 add_library(mmio STATIC "${MMIO_DIR}/mmio.c")
 target_include_directories(mmio PUBLIC "${MMIO_DIR}")
 
 # ============================================================
-# Helpers: manual flags (no try_compile, no FindOpenMP/MPI)
+# OpenMP (for D1 spmv_csr)
 # ============================================================
-find_library(STDCXXFS_LIB stdc++fs)
-
-function(parco_set_cpp17 tgt)
-  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-    target_compile_options(${tgt} PRIVATE -std=gnu++17)
-  elseif (MSVC)
-    target_compile_options(${tgt} PRIVATE /std:c++17)
-  endif()
-endfunction()
-
-function(parco_release_flags tgt)
-  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-    target_compile_options(${tgt} PRIVATE $<$<CONFIG:Release>:-O3>)
-    if (PARCO_MARCH_NATIVE)
-      target_compile_options(${tgt} PRIVATE -march=native)
-    endif()
-  elseif (MSVC)
-    target_compile_options(${tgt} PRIVATE $<$<CONFIG:Release>:/O2>)
-  endif()
-endfunction()
-
-function(parco_enable_openmp_manual tgt)
-  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-    target_compile_options(${tgt} PRIVATE -fopenmp)
-    target_link_options(${tgt} PRIVATE -fopenmp)
-  elseif (MSVC)
-    target_compile_options(${tgt} PRIVATE /openmp)
-  endif()
-endfunction()
-
-function(parco_maybe_link_stdcxxfs tgt)
-  if (STDCXXFS_LIB)
-    target_link_libraries(${tgt} PRIVATE ${STDCXXFS_LIB})
-  endif()
-endfunction()
-
-function(parco_warnings tgt)
-  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-    target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wno-unknown-pragmas)
-  endif()
-endfunction()
+find_package(OpenMP QUIET)
 
 # ============================================================
-# Deliverable 1 targets (OpenMP)
+# Deliverable 1 targets
 # ============================================================
+
+# ---- spmv_csr ----
 add_executable(spmv_csr "${CODE_DIR}/spmv_csr.cpp")
 target_link_libraries(spmv_csr PRIVATE mmio)
-parco_set_cpp17(spmv_csr)
-parco_release_flags(spmv_csr)
-parco_warnings(spmv_csr)
-parco_maybe_link_stdcxxfs(spmv_csr)
 
-if (PARCO_BUILD_OMP)
-  parco_enable_openmp_manual(spmv_csr)
+if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(spmv_csr PRIVATE -O3 -march=native)
+  if (OpenMP_CXX_FOUND)
+    target_link_libraries(spmv_csr PRIVATE OpenMP::OpenMP_CXX)
+  else()
+    target_compile_options(spmv_csr PRIVATE -fopenmp)
+    target_link_options(spmv_csr PRIVATE -fopenmp)
+  endif()
+elseif (MSVC)
+  target_compile_options(spmv_csr PRIVATE
+          $<$<CONFIG:Release>:/O2>
+          $<$<CONFIG:Release>:/openmp>
+  )
+  if (OpenMP_CXX_FOUND)
+    target_link_libraries(spmv_csr PRIVATE OpenMP::OpenMP_CXX)
+  endif()
 endif()
 
-# custom_matrix
+# ---- custom_matrix ----
 if (EXISTS "${CODE_DIR}/custom_matrix.cpp")
   add_executable(custom_matrix "${CODE_DIR}/custom_matrix.cpp")
   target_link_libraries(custom_matrix PRIVATE mmio)
-  parco_set_cpp17(custom_matrix)
-  parco_release_flags(custom_matrix)
-  parco_warnings(custom_matrix)
-  parco_maybe_link_stdcxxfs(custom_matrix)
 
-  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
-    target_compile_options(custom_matrix PRIVATE -Wno-write-strings)
+  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(custom_matrix PRIVATE -O2 -Wno-write-strings)
+  elseif (MSVC)
+    target_compile_options(custom_matrix PRIVATE $<$<CONFIG:Release>:/O2>)
   endif()
 else()
-  message(STATUS "custom_matrix.cpp not found in ${CODE_DIR}; skipping.")
+  message(WARNING "custom_matrix.cpp not found in ${CODE_DIR}; target custom_matrix will NOT be built.")
 endif()
 
-# make_matrices
+# ---- make_matrices ----
 if (EXISTS "${CODE_DIR}/make_matrices.cpp")
   add_executable(make_matrices "${CODE_DIR}/make_matrices.cpp")
-  parco_set_cpp17(make_matrices)
-  parco_release_flags(make_matrices)
-  parco_warnings(make_matrices)
-  parco_maybe_link_stdcxxfs(make_matrices)
+
+  if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(make_matrices PRIVATE -O2)
+  elseif (MSVC)
+    target_compile_options(make_matrices PRIVATE $<$<CONFIG:Release>:/O2>)
+  endif()
 else()
-  message(STATUS "make_matrices.cpp not found in ${CODE_DIR}; skipping.")
+  message(WARNING "make_matrices.cpp not found in ${CODE_DIR}; target make_matrices will NOT be built.")
 endif()
 
 # ============================================================
-# Deliverable 2 target (MPI wrapper-based + OpenMP manual)
-# IMPORTANT: configure with -DCMAKE_CXX_COMPILER=mpicxx / mpic++
+# Deliverable 2 — MPI-only (optional)
+# Expected file at: D2-code/spmv_mpi.cpp
 # ============================================================
+option(PARCO_BUILD_MPI "Build Deliverable 2 MPI target (spmv_mpi)" ON)
+
 if (PARCO_BUILD_MPI)
-  set(D2_SRC "${CMAKE_SOURCE_DIR}/D2-code/spmv_mpi.cpp")
+  set(D2_DIR "${CMAKE_SOURCE_DIR}/D2-code")
+  set(D2_SRC "${D2_DIR}/spmv_mpi.cpp")
+
   if (EXISTS "${D2_SRC}")
-    add_executable(spmv_mpi "${D2_SRC}")
-    parco_set_cpp17(spmv_mpi)
-    parco_release_flags(spmv_mpi)
-    parco_warnings(spmv_mpi)
-    parco_maybe_link_stdcxxfs(spmv_mpi)
+    find_package(MPI QUIET)
+    if (MPI_FOUND)
+      add_executable(spmv_mpi "${D2_SRC}")
+      target_link_libraries(spmv_mpi PRIVATE mmio MPI::MPI_CXX)
 
-    # D2 includes omp.h and uses omp_*, so enable OpenMP flags too
-    if (PARCO_BUILD_OMP)
-      parco_enable_openmp_manual(spmv_mpi)
+      if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(spmv_mpi PRIVATE -O3 -march=native)
+      elseif (MSVC)
+        target_compile_options(spmv_mpi PRIVATE $<$<CONFIG:Release>:/O2>)
+      endif()
+    else()
+      message(WARNING
+              "MPI not found: spmv_mpi target will NOT be built. "
+              "On Windows disable it with -DPARCO_BUILD_MPI=OFF."
+      )
     endif()
-
-    message(STATUS "D2 target enabled: spmv_mpi (MPI wrapper-based, OpenMP manual)")
-    message(STATUS "IMPORTANT: configure with -DCMAKE_CXX_COMPILER=mpic++ (wrapper).")
   else()
-    message(STATUS "D2 source not found (${D2_SRC}); spmv_mpi skipped.")
+    message(STATUS "D2 source not found (${D2_SRC}); spmv_mpi target will be skipped.")
   endif()
 endif()
 
 # ============================================================
-# Datasets (SuiteSparse Matrix Collection) - optional download
-# CMake 3.15 compatible: extract all, then copy .mtx to matrices/
+# Force output dir for all built targets & all configs
 # ============================================================
-set(PARCO_MATRICES_DIR "${CMAKE_SOURCE_DIR}/matrices" CACHE PATH "Directory for input matrices")
-file(MAKE_DIRECTORY "${PARCO_MATRICES_DIR}")
-
-if (PARCO_FETCH_DATASETS)
-  find_program(CURL_EXECUTABLE curl)
-  find_program(WGET_EXECUTABLE wget)
-
-  function(parco_add_dataset target_name url out_file)
-    set(OUT_PATH "${PARCO_MATRICES_DIR}/${out_file}")
-    set(TAR_PATH "${PARCO_MATRICES_DIR}/${target_name}.tar.gz")
-
-    set(EXTRACT_SCRIPT "${CMAKE_BINARY_DIR}/${target_name}_extract.cmake")
-    file(WRITE "${EXTRACT_SCRIPT}" "
-      if(NOT EXISTS \"${TAR_PATH}\")
-        message(FATAL_ERROR \"Archive not found: ${TAR_PATH}\")
-      endif()
-
-      execute_process(
-        COMMAND \"${CMAKE_COMMAND}\" -E tar xzf \"${TAR_PATH}\"
-        WORKING_DIRECTORY \"${PARCO_MATRICES_DIR}\"
-        RESULT_VARIABLE rc
-      )
-      if(NOT rc EQUAL 0)
-        message(FATAL_ERROR \"Extraction failed (rc=\${rc})\")
-      endif()
-
-      file(GLOB_RECURSE hits
-        \"${PARCO_MATRICES_DIR}/${out_file}\"
-        \"${PARCO_MATRICES_DIR}/*/${out_file}\"
-        \"${PARCO_MATRICES_DIR}/*/*/${out_file}\"
-      )
-      list(LENGTH hits n)
-      if(n EQUAL 0)
-        message(FATAL_ERROR \"Could not find ${out_file} after extraction in ${PARCO_MATRICES_DIR}\")
-      endif()
-
-      list(GET hits 0 src)
-      message(STATUS \"Found ${out_file} at: \${src}\")
-      execute_process(COMMAND \"${CMAKE_COMMAND}\" -E copy_if_different \"\${src}\" \"${OUT_PATH}\")
-    ")
-
-    if (CURL_EXECUTABLE)
-      add_custom_target(${target_name}
-              COMMAND ${CMAKE_COMMAND} -E echo "Downloading ${out_file} into ${PARCO_MATRICES_DIR}"
-              COMMAND ${CURL_EXECUTABLE} -L -o "${TAR_PATH}" "${url}"
-              COMMAND ${CMAKE_COMMAND} -P "${EXTRACT_SCRIPT}"
-              COMMAND ${CMAKE_COMMAND} -E rm -f "${TAR_PATH}"
-              BYPRODUCTS "${OUT_PATH}"
-              COMMENT "Fetching dataset ${out_file}"
-              VERBATIM
-      )
-    elseif (WGET_EXECUTABLE)
-      add_custom_target(${target_name}
-              COMMAND ${CMAKE_COMMAND} -E echo "Downloading ${out_file} into ${PARCO_MATRICES_DIR}"
-              COMMAND ${WGET_EXECUTABLE} -O "${TAR_PATH}" "${url}"
-              COMMAND ${CMAKE_COMMAND} -P "${EXTRACT_SCRIPT}"
-              COMMAND ${CMAKE_COMMAND} -E rm -f "${TAR_PATH}"
-              BYPRODUCTS "${OUT_PATH}"
-              COMMENT "Fetching dataset ${out_file}"
-              VERBATIM
-      )
-    else()
-      message(WARNING
-              "Neither 'curl' nor 'wget' found. Dataset targets will not work.\n"
-              "Download matrices manually into: ${PARCO_MATRICES_DIR}"
-      )
-    endif()
-  endfunction()
-
-  # Strong scaling matrix (real): DIMACS10 / kron_g500-logn21
-  parco_add_dataset(dataset_kron_g500_logn21
-          "https://suitesparse-collection-website.herokuapp.com/MM/DIMACS10/kron_g500-logn21.tar.gz"
-          "kron_g500-logn21.mtx"
-  )
-
-  message(STATUS "Dataset target available: dataset_kron_g500_logn21")
-  message(STATUS "Matrices directory: ${PARCO_MATRICES_DIR}")
+set(_ALL_TARGETS spmv_csr)
+if (TARGET custom_matrix)
+  list(APPEND _ALL_TARGETS custom_matrix)
 endif()
+if (TARGET make_matrices)
+  list(APPEND _ALL_TARGETS make_matrices)
+endif()
+if (TARGET spmv_mpi)
+  list(APPEND _ALL_TARGETS spmv_mpi)
+endif()
+
+foreach(tgt IN LISTS _ALL_TARGETS)
+  set_target_properties(${tgt} PROPERTIES
+          RUNTIME_OUTPUT_DIRECTORY                 "${CMAKE_SOURCE_DIR}/bin"
+          RUNTIME_OUTPUT_DIRECTORY_DEBUG           "${CMAKE_SOURCE_DIR}/bin"
+          RUNTIME_OUTPUT_DIRECTORY_RELEASE         "${CMAKE_SOURCE_DIR}/bin"
+          RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO  "${CMAKE_SOURCE_DIR}/bin"
+          RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL      "${CMAKE_SOURCE_DIR}/bin"
+  )
+endforeach()
+
+# ============================================================
+# Install (optional)
+# ============================================================
+install(TARGETS ${_ALL_TARGETS} RUNTIME DESTINATION bin)
+
+# ============================================================
+# Packaging (optional)
+# ============================================================
+set(CPACK_GENERATOR "TGZ;ZIP")
+set(CPACK_PACKAGE_NAME "parco")
+set(CPACK_PACKAGE_VERSION "1.0.0")
+include(CPack)
