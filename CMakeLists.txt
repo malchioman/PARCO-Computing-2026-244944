@@ -16,31 +16,50 @@ endif()
 
 # Build toggles
 option(PARCO_BUILD_OMP "Build OpenMP targets (Deliverable 1)" ON)
-option(PARCO_BUILD_MPI "Build MPI target (Deliverable 2)" ON)
+option(PARCO_BUILD_MPI "Build MPI targets (Deliverable 2)" ON)
 
 # On clusters: -march=native is risky (login node != compute nodes)
 option(PARCO_MARCH_NATIVE "Enable -march=native (NOT recommended on clusters)" OFF)
 
 # ============================================================
-# Output directories (repo_root/bin)
+# FORCE output directories to <repo>/bin (robust with IDEs)
 # ============================================================
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
+set(PARCO_BIN_DIR "${PROJECT_SOURCE_DIR}/bin")
+
+# Global defaults (some IDEs may override -> we also set per-target below)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PARCO_BIN_DIR}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${PARCO_BIN_DIR}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PARCO_BIN_DIR}")
 
 foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
   string(TOUPPER ${cfg} CFG_UP)
-  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CFG_UP} "${CMAKE_SOURCE_DIR}/bin")
-  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CFG_UP} "${CMAKE_SOURCE_DIR}/bin")
-  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CFG_UP} "${CMAKE_SOURCE_DIR}/bin")
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CFG_UP} "${PARCO_BIN_DIR}")
+  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${CFG_UP} "${PARCO_BIN_DIR}")
+  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${CFG_UP} "${PARCO_BIN_DIR}")
 endforeach()
+
+function(parco_force_bin_output tgt)
+  set_target_properties(${tgt} PROPERTIES
+          RUNTIME_OUTPUT_DIRECTORY "${PARCO_BIN_DIR}"
+          ARCHIVE_OUTPUT_DIRECTORY "${PARCO_BIN_DIR}"
+          LIBRARY_OUTPUT_DIRECTORY "${PARCO_BIN_DIR}"
+  )
+  foreach(cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    string(TOUPPER ${cfg} CFG_UP)
+    set_target_properties(${tgt} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY_${CFG_UP} "${PARCO_BIN_DIR}"
+            ARCHIVE_OUTPUT_DIRECTORY_${CFG_UP} "${PARCO_BIN_DIR}"
+            LIBRARY_OUTPUT_DIRECTORY_${CFG_UP} "${PARCO_BIN_DIR}"
+    )
+  endforeach()
+endfunction()
 
 # ============================================================
 # Locate Deliverable 1 source dir robustly (code or D1-code)
 # ============================================================
 set(CODE_DIR_CANDIDATES
-        "${CMAKE_SOURCE_DIR}/code"
-        "${CMAKE_SOURCE_DIR}/D1-code"
+        "${PROJECT_SOURCE_DIR}/code"
+        "${PROJECT_SOURCE_DIR}/D1-code"
 )
 
 set(CODE_DIR "")
@@ -55,8 +74,8 @@ if (CODE_DIR STREQUAL "")
   message(FATAL_ERROR
           "Could not find Deliverable 1 sources.\n"
           "Expected spmv_csr.cpp inside one of:\n"
-          "  - ${CMAKE_SOURCE_DIR}/code\n"
-          "  - ${CMAKE_SOURCE_DIR}/D1-code\n"
+          "  - ${PROJECT_SOURCE_DIR}/code\n"
+          "  - ${PROJECT_SOURCE_DIR}/D1-code\n"
           "Fix: rename your D1 folder or update CODE_DIR_CANDIDATES."
   )
 endif()
@@ -66,7 +85,7 @@ message(STATUS "Deliverable 1 CODE_DIR = ${CODE_DIR}")
 # ============================================================
 # Locate mmio dir (must be ./mmio)
 # ============================================================
-set(MMIO_DIR "${CMAKE_SOURCE_DIR}/mmio")
+set(MMIO_DIR "${PROJECT_SOURCE_DIR}/mmio")
 if(NOT EXISTS "${MMIO_DIR}/mmio.c" OR NOT EXISTS "${MMIO_DIR}/mmio.h")
   message(FATAL_ERROR
           "mmio not found.\n"
@@ -82,6 +101,7 @@ endif()
 # ============================================================
 add_library(mmio STATIC "${MMIO_DIR}/mmio.c")
 target_include_directories(mmio PUBLIC "${MMIO_DIR}")
+parco_force_bin_output(mmio) # harmless; keeps archive in bin too
 
 # ============================================================
 # Packages (OpenMP/MPI)
@@ -141,10 +161,10 @@ endfunction()
 # Deliverable 1 targets
 # ============================================================
 add_executable(spmv_csr "${CODE_DIR}/spmv_csr.cpp")
+parco_force_bin_output(spmv_csr)
 target_link_libraries(spmv_csr PRIVATE mmio)
 parco_release_flags(spmv_csr)
 parco_fix_filesystem(spmv_csr)
-
 if(PARCO_BUILD_OMP)
   parco_link_openmp(spmv_csr)
 endif()
@@ -152,6 +172,7 @@ endif()
 # ---- custom_matrix ----
 if (EXISTS "${CODE_DIR}/custom_matrix.cpp")
   add_executable(custom_matrix "${CODE_DIR}/custom_matrix.cpp")
+  parco_force_bin_output(custom_matrix)
   target_link_libraries(custom_matrix PRIVATE mmio)
   parco_release_flags(custom_matrix)
   parco_fix_filesystem(custom_matrix)
@@ -166,6 +187,7 @@ endif()
 # ---- make_matrices ----
 if (EXISTS "${CODE_DIR}/make_matrices.cpp")
   add_executable(make_matrices "${CODE_DIR}/make_matrices.cpp")
+  parco_force_bin_output(make_matrices)
   parco_release_flags(make_matrices)
   parco_fix_filesystem(make_matrices)
 else()
@@ -178,16 +200,17 @@ endif()
 #   - strong_matrix: D2-code/strong_matrix.cpp
 # ============================================================
 if(PARCO_BUILD_MPI)
-  set(D2_DIR "${CMAKE_SOURCE_DIR}/D2-code")
-
+  set(D2_DIR "${PROJECT_SOURCE_DIR}/D2-code")
   set(D2_SPMV_MPI_SRC      "${D2_DIR}/spmv_mpi.cpp")
   set(D2_STRONG_MATRIX_SRC "${D2_DIR}/strong_matrix.cpp")
 
   # ---- spmv_mpi ----
   if (EXISTS "${D2_SPMV_MPI_SRC}")
     add_executable(spmv_mpi "${D2_SPMV_MPI_SRC}")
+    parco_force_bin_output(spmv_mpi)
     target_link_libraries(spmv_mpi PRIVATE MPI::MPI_CXX mmio)
 
+    # If your spmv_mpi.cpp uses omp.h / omp calls, keep this ON
     if(PARCO_BUILD_OMP)
       parco_link_openmp(spmv_mpi)
     endif()
@@ -203,8 +226,10 @@ if(PARCO_BUILD_MPI)
   # ---- strong_matrix ----
   if (EXISTS "${D2_STRONG_MATRIX_SRC}")
     add_executable(strong_matrix "${D2_STRONG_MATRIX_SRC}")
+    parco_force_bin_output(strong_matrix)
     target_link_libraries(strong_matrix PRIVATE MPI::MPI_CXX mmio)
 
+    # enable if strong_matrix.cpp uses omp.h
     if(PARCO_BUILD_OMP)
       parco_link_openmp(strong_matrix)
     endif()
@@ -222,7 +247,6 @@ endif()
 # Install (optional)
 # ============================================================
 set(_ALL_TARGETS spmv_csr)
-
 if (TARGET custom_matrix)
   list(APPEND _ALL_TARGETS custom_matrix)
 endif()
