@@ -280,6 +280,7 @@ static void parallel_read_matrix_market_mpiio(const char* path,
         MPI_File_read_at(fh, 0, head.data(), (int)HEAD_MAX, MPI_CHAR, &st);
 
         // Banner check (soft)
+        /*
         {
             size_t eol = 0;
             while (eol < head.size() && head[eol] != '\n') eol++;
@@ -297,6 +298,7 @@ static void parallel_read_matrix_market_mpiio(const char* path,
                 }
             }
         }
+        */
 
         // scan lines and find dims line using real '\n' offsets
         size_t pos = 0;
