@@ -24,24 +24,20 @@ static bool exists_nonempty(const fs::path& p) {
   return fs::exists(p, ec) && fs::is_regular_file(p, ec) && fs::file_size(p, ec) > 0;
 }
 
+// Destination ALWAYS repo_root/matrices inferred from exe in repo_root/bin
 static fs::path matrices_dir_from_exe(const char* argv0) {
   std::error_code ec;
 
   fs::path exePath = fs::path(argv0);
-  if (exePath.is_relative()) {
-    exePath = fs::current_path(ec) / exePath;
-  }
+  if (exePath.is_relative()) exePath = fs::current_path(ec) / exePath;
 
   fs::path canon = fs::weakly_canonical(exePath, ec);
   if (!ec) exePath = canon;
 
   fs::path exeDir = exePath.parent_path();
-
-  // Expect exe in repo_root/bin -> matrices in repo_root/matrices
   if (exeDir.filename() == "bin") {
     return (exeDir.parent_path() / "matrices").lexically_normal();
   }
-  // Fallback
   return (exeDir / ".." / "matrices").lexically_normal();
 }
 
@@ -60,7 +56,10 @@ int main(int argc, char** argv) {
     std::cerr << "Errore: 'tar' non trovato nel PATH.\n";
     return 3;
   }
-  if (!has_cmd("curl") && !has_cmd("wget")) {
+
+  const bool have_curl = has_cmd("curl");
+  const bool have_wget = has_cmd("wget");
+  if (!have_curl && !have_wget) {
     std::cerr << "Errore: serve 'curl' oppure 'wget' nel PATH.\n";
     return 4;
   }
@@ -70,7 +69,6 @@ int main(int argc, char** argv) {
 
   const fs::path archive = dest_dir / (matrix + ".tar.gz");
 
-  // Your cluster: HTTP works; HTTPS tends to reset
   const std::string url_http  = "http://sparse-files.engr.tamu.edu/MM/DIMACS10/" + matrix + ".tar.gz";
   const std::string url_https = "https://sparse-files.engr.tamu.edu/MM/DIMACS10/" + matrix + ".tar.gz";
 
@@ -86,37 +84,37 @@ int main(int argc, char** argv) {
   } else {
     int rc = 1;
 
-    if (has_cmd("curl")) {
+    if (have_curl) {
       auto curl_download = [&](const std::string& url) -> int {
-        // NOTE: do NOT use --http1.1 (not supported on your curl)
-        // -C - enables resume (very useful on flaky/slow links)
+        // SUPER compatible curl flags:
+        // -L follow redirects
+        // -f fail on HTTP errors
+        // --retry N is widely supported
+        // -C - resume download
+        //
+        // NOTE: we avoid --retry-all-errors / --http1.1 etc.
         std::string cmd =
-          "curl -L --fail "
-          "--connect-timeout 15 "
-          "--retry 10 --retry-all-errors --retry-delay 2 "
-          "--speed-time 30 --speed-limit 1024 "
-          "-C - "
+          "curl -L -f --retry 10 -C - "
           "-o \"" + archive.string() + "\" \"" + url + "\"";
         return run_cmd(cmd);
       };
 
       std::cout << "[fetch] downloading via curl (http)...\n";
       rc = curl_download(url_http);
-
       if (rc != 0) {
         std::cout << "[fetch] curl http failed (rc=" << rc << "), trying https...\n";
         rc = curl_download(url_https);
       }
     } else {
+      // wget (also widely available)
       auto wget_download = [&](const std::string& url) -> int {
         std::string cmd =
-          "wget --tries=10 --timeout=15 -O \"" + archive.string() + "\" \"" + url + "\"";
+          "wget -O \"" + archive.string() + "\" \"" + url + "\"";
         return run_cmd(cmd);
       };
 
       std::cout << "[fetch] downloading via wget (http)...\n";
       rc = wget_download(url_http);
-
       if (rc != 0) {
         std::cout << "[fetch] wget http failed (rc=" << rc << "), trying https...\n";
         rc = wget_download(url_https);
@@ -127,6 +125,7 @@ int main(int argc, char** argv) {
       std::cerr << "[fetch] ERROR: download failed.\n";
       std::cerr << "[fetch] Try manually:\n";
       std::cerr << "  curl -L -C - -o " << archive.string() << " " << url_http << "\n";
+      std::cerr << "  (or) wget -O " << archive.string() << " " << url_http << "\n";
       return 5;
     }
 
@@ -142,7 +141,7 @@ int main(int argc, char** argv) {
     return 6;
   }
 
-  // 3) Find a .mtx or .mtx.gz
+  // 3) Find .mtx or .mtx.gz
   fs::path found;
   for (auto const& entry : fs::recursive_directory_iterator(dest_dir)) {
     if (!entry.is_regular_file()) continue;
