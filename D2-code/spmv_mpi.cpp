@@ -293,7 +293,7 @@ static void parallel_read_matrix_market_mpiio(const char* path,
                     std::cerr << "[warning] MatrixMarket banner not 'matrix coordinate ...'\n";
                 }
                 if (banner.find("real") == std::string::npos) {
-                    std::cerr << "[warning] MatrixMarket data type not 'real' (parser expects i j val)\n";
+                   // std::cerr << "[warning] MatrixMarket data type not 'real' (parser expects i j val)\n";
                 }
             }
         }
