@@ -5,17 +5,8 @@
 
 namespace fs = std::filesystem;
 
-static bool has_cmd(const std::string& cmd) {
-#ifdef _WIN32
-  std::string test = "where " + cmd + " >nul 2>nul";
-#else
-  std::string test = "command -v " + cmd + " >/dev/null 2>&1";
-#endif
-  return std::system(test.c_str()) == 0;
-}
-
-static int run_cmd(const std::string& cmd) {
-  std::cout << "[fetch] cmd: " << cmd << "\n";
+static int run(const std::string& cmd) {
+  std::cout << "[fetch] " << cmd << "\n";
   return std::system(cmd.c_str());
 }
 
@@ -24,152 +15,77 @@ static bool exists_nonempty(const fs::path& p) {
   return fs::exists(p, ec) && fs::is_regular_file(p, ec) && fs::file_size(p, ec) > 0;
 }
 
-// Destination ALWAYS repo_root/matrices inferred from exe in repo_root/bin
-static fs::path matrices_dir_from_exe(const char* argv0) {
+static fs::path matrices_dir_next_to_exe(const char* argv0) {
   std::error_code ec;
-
-  fs::path exePath = fs::path(argv0);
-  if (exePath.is_relative()) exePath = fs::current_path(ec) / exePath;
-
-  fs::path canon = fs::weakly_canonical(exePath, ec);
-  if (!ec) exePath = canon;
-
-  fs::path exeDir = exePath.parent_path();
-  if (exeDir.filename() == "bin") {
-    return (exeDir.parent_path() / "matrices").lexically_normal();
-  }
-  return (exeDir / ".." / "matrices").lexically_normal();
-}
-
-static bool ends_with(const std::string& s, const std::string& suf) {
-  return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
+  fs::path exe = fs::path(argv0);
+  if (exe.is_relative()) exe = fs::current_path(ec) / exe;
+  exe = fs::weakly_canonical(exe, ec);
+  return (exe.parent_path() / "matrices").lexically_normal(); // bin/matrices
 }
 
 int main(int argc, char** argv) {
   const std::string matrix = (argc >= 2) ? argv[1] : "kron_g500-logn21";
   if (matrix != "kron_g500-logn21") {
-    std::cerr << "Per ora supporto solo: kron_g500-logn21\n";
-    return 2;
+    std::cerr << "Supporto solo kron_g500-logn21\n";
+    return 1;
   }
 
-  if (!has_cmd("tar")) {
-    std::cerr << "Errore: 'tar' non trovato nel PATH.\n";
+  const fs::path dest = matrices_dir_next_to_exe(argv[0]); // bin/matrices
+  fs::create_directories(dest);
+
+  const fs::path final_mtx = dest / (matrix + ".mtx");
+  const fs::path archive   = dest / (matrix + ".tar.gz");
+
+  // Se esiste già il .mtx finale, fine.
+  if (exists_nonempty(final_mtx)) {
+    std::cout << "[fetch] already have " << final_mtx.string() << "\n";
+    return 0;
+  }
+
+  // L’unico URL che ti funziona (HTTP)
+  const std::string url =
+    "http://sparse-files.engr.tamu.edu/MM/DIMACS10/kron_g500-logn21.tar.gz";
+
+  // 1) Download (curl minimal, resume)
+  if (!exists_nonempty(archive)) {
+    int rc = run("curl -L -f --retry 10 -C - -o \"" + archive.string() + "\" \"" + url + "\"");
+    if (rc != 0 || !exists_nonempty(archive)) {
+      std::cerr << "[fetch] download failed\n";
+      return 2;
+    }
+  } else {
+    std::cout << "[fetch] archive already exists, skip download\n";
+  }
+
+  // 2) Extract into dest (creates dest/kron_g500-logn21/kron_g500-logn21.mtx)
+  int exrc = run("tar -xzf \"" + archive.string() + "\" -C \"" + dest.string() + "\"");
+  if (exrc != 0) {
+    std::cerr << "[fetch] extraction failed\n";
     return 3;
   }
 
-  const bool have_curl = has_cmd("curl");
-  const bool have_wget = has_cmd("wget");
-  if (!have_curl && !have_wget) {
-    std::cerr << "Errore: serve 'curl' oppure 'wget' nel PATH.\n";
+  // 3) Move Matrix Market to dest as kron_g500-logn21.mtx
+  fs::path extracted_mtx = dest / matrix / (matrix + ".mtx"); // path standard in this tarball
+  if (!exists_nonempty(extracted_mtx)) {
+    std::cerr << "[fetch] expected file not found: " << extracted_mtx.string() << "\n";
     return 4;
   }
 
-  const fs::path dest_dir = matrices_dir_from_exe(argv[0]);
-  fs::create_directories(dest_dir);
-
-  const fs::path archive = dest_dir / (matrix + ".tar.gz");
-
-  const std::string url_http  = "http://sparse-files.engr.tamu.edu/MM/DIMACS10/" + matrix + ".tar.gz";
-  const std::string url_https = "https://sparse-files.engr.tamu.edu/MM/DIMACS10/" + matrix + ".tar.gz";
-
-  std::cout << "[fetch] matrix  = " << matrix << "\n";
-  std::cout << "[fetch] exe     = " << argv[0] << "\n";
-  std::cout << "[fetch] dest    = " << dest_dir.string() << "\n";
-  std::cout << "[fetch] archive = " << archive.string() << "\n";
-  std::cout << "[fetch] url     = " << url_http << "\n";
-
-  // 1) Download (skip if already present)
-  if (exists_nonempty(archive)) {
-    std::cout << "[fetch] archive already exists, skip download.\n";
-  } else {
-    int rc = 1;
-
-    if (have_curl) {
-      auto curl_download = [&](const std::string& url) -> int {
-        // SUPER compatible curl flags:
-        // -L follow redirects
-        // -f fail on HTTP errors
-        // --retry N is widely supported
-        // -C - resume download
-        //
-        // NOTE: we avoid --retry-all-errors / --http1.1 etc.
-        std::string cmd =
-          "curl -L -f --retry 10 -C - "
-          "-o \"" + archive.string() + "\" \"" + url + "\"";
-        return run_cmd(cmd);
-      };
-
-      std::cout << "[fetch] downloading via curl (http)...\n";
-      rc = curl_download(url_http);
-      if (rc != 0) {
-        std::cout << "[fetch] curl http failed (rc=" << rc << "), trying https...\n";
-        rc = curl_download(url_https);
-      }
-    } else {
-      // wget (also widely available)
-      auto wget_download = [&](const std::string& url) -> int {
-        std::string cmd =
-          "wget -O \"" + archive.string() + "\" \"" + url + "\"";
-        return run_cmd(cmd);
-      };
-
-      std::cout << "[fetch] downloading via wget (http)...\n";
-      rc = wget_download(url_http);
-      if (rc != 0) {
-        std::cout << "[fetch] wget http failed (rc=" << rc << "), trying https...\n";
-        rc = wget_download(url_https);
-      }
-    }
-
-    if (rc != 0 || !exists_nonempty(archive)) {
-      std::cerr << "[fetch] ERROR: download failed.\n";
-      std::cerr << "[fetch] Try manually:\n";
-      std::cerr << "  curl -L -C - -o " << archive.string() << " " << url_http << "\n";
-      std::cerr << "  (or) wget -O " << archive.string() << " " << url_http << "\n";
+  std::error_code ec;
+  fs::rename(extracted_mtx, final_mtx, ec);
+  if (ec) {
+    // fallback copy
+    fs::copy_file(extracted_mtx, final_mtx, fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+      std::cerr << "[fetch] move/copy failed\n";
       return 5;
     }
-
-    std::cout << "[fetch] download OK.\n";
   }
 
-  // 2) Extract
-  std::cout << "[fetch] extracting...\n";
-  std::string ex = "tar -xzf \"" + archive.string() + "\" -C \"" + dest_dir.string() + "\"";
-  int exrc = run_cmd(ex);
-  if (exrc != 0) {
-    std::cerr << "[fetch] ERROR: extraction failed.\n";
-    return 6;
-  }
+  // 4) Cleanup: remove extracted folder and archive -> keep only .mtx
+  fs::remove_all(dest / matrix, ec);
+  fs::remove(archive, ec);
 
-  // 3) Find .mtx or .mtx.gz
-  fs::path found;
-  for (auto const& entry : fs::recursive_directory_iterator(dest_dir)) {
-    if (!entry.is_regular_file()) continue;
-    const fs::path p = entry.path();
-    const std::string name = p.filename().string();
-    if (ends_with(name, ".mtx") || ends_with(name, ".mtx.gz")) {
-      found = p;
-      break;
-    }
-  }
-
-  if (!found.empty()) {
-    std::cout << "[fetch] found matrix file: " << found.string() << "\n";
-    // Move to matrices root for convenience
-    if (found.parent_path() != dest_dir) {
-      fs::path dst = dest_dir / found.filename();
-      std::error_code ec;
-      fs::rename(found, dst, ec);
-      if (!ec) {
-        std::cout << "[fetch] moved to: " << dst.string() << "\n";
-      } else {
-        std::cout << "[fetch] could not move (ok). Keeping at: " << found.string() << "\n";
-      }
-    }
-  } else {
-    std::cout << "[fetch] WARNING: no .mtx or .mtx.gz found under " << dest_dir.string() << "\n";
-  }
-
-  std::cout << "[fetch] done.\n";
+  std::cout << "[fetch] done: " << final_mtx.string() << "\n";
   return 0;
 }
