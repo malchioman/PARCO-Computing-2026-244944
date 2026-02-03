@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# INIZIALIZZA I MODULES (QUESTA ERA LA PARTE MANCANTE)
+# init modules (per script non interattivi)
 source /etc/profile
 source /etc/profile.d/modules.sh
 
@@ -13,10 +13,11 @@ module load cmake-3.15.4
 export OMPI_CXX=/apps/gcc-9.1.0/local/bin/g++-9.1.0
 export OMPI_CC=/apps/gcc-9.1.0/local/bin/gcc-9.1.0
 
-cd "$(dirname "$0")/.."
+# vai alla root repo senza dirname (più robusto)
+cd ..
 
-rm -rf build bin
-mkdir -p build
+rm -rf build
+mkdir -p build bin
 
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
