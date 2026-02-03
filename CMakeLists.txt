@@ -22,7 +22,7 @@ option(PARCO_BUILD_MPI "Build MPI target (Deliverable 2)" ON)
 option(PARCO_MARCH_NATIVE "Enable -march=native (NOT recommended on clusters)" OFF)
 
 # ============================================================
-# Output directories (bin/)
+# Output directories (repo_root/bin)
 # ============================================================
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY  "${CMAKE_SOURCE_DIR}/bin")
@@ -84,7 +84,7 @@ add_library(mmio STATIC "${MMIO_DIR}/mmio.c")
 target_include_directories(mmio PUBLIC "${MMIO_DIR}")
 
 # ============================================================
-# Packages (OpenMP/MPI) - robust on clusters
+# Packages (OpenMP/MPI)
 # ============================================================
 if(PARCO_BUILD_OMP)
   find_package(OpenMP REQUIRED)
@@ -138,7 +138,7 @@ function(parco_fix_filesystem tgt)
 endfunction()
 
 # ============================================================
-# Deliverable 1 targets (OpenMP)
+# Deliverable 1 targets
 # ============================================================
 add_executable(spmv_csr "${CODE_DIR}/spmv_csr.cpp")
 target_link_libraries(spmv_csr PRIVATE mmio)
@@ -173,20 +173,21 @@ else()
 endif()
 
 # ============================================================
-# Deliverable 2 target (MPI + OpenMP, since your code uses omp.h)
-# Expected file at: D2-code/spmv_mpi.cpp
+# Deliverable 2 targets (MPI)
+#   - spmv_mpi:      D2-code/spmv_mpi.cpp
+#   - strong_matrix: D2-code/strong_matrix.cpp
 # ============================================================
 if(PARCO_BUILD_MPI)
   set(D2_DIR "${CMAKE_SOURCE_DIR}/D2-code")
-  set(D2_SRC "${D2_DIR}/spmv_mpi.cpp")
 
-  if (EXISTS "${D2_SRC}")
-    add_executable(spmv_mpi "${D2_SRC}")
+  set(D2_SPMV_MPI_SRC      "${D2_DIR}/spmv_mpi.cpp")
+  set(D2_STRONG_MATRIX_SRC "${D2_DIR}/strong_matrix.cpp")
 
-    # MPI
-    target_link_libraries(spmv_mpi PRIVATE MPI::MPI_CXX)
+  # ---- spmv_mpi ----
+  if (EXISTS "${D2_SPMV_MPI_SRC}")
+    add_executable(spmv_mpi "${D2_SPMV_MPI_SRC}")
+    target_link_libraries(spmv_mpi PRIVATE MPI::MPI_CXX mmio)
 
-    # OpenMP (your D2 code uses omp.h and omp_* calls)
     if(PARCO_BUILD_OMP)
       parco_link_openmp(spmv_mpi)
     endif()
@@ -194,9 +195,26 @@ if(PARCO_BUILD_MPI)
     parco_release_flags(spmv_mpi)
     parco_fix_filesystem(spmv_mpi)
 
-    message(STATUS "D2 target enabled: spmv_mpi (FindMPI + OpenMP)")
+    message(STATUS "D2 target enabled: spmv_mpi")
   else()
-    message(STATUS "D2 source not found (${D2_SRC}); spmv_mpi target will be skipped.")
+    message(STATUS "D2 source not found (${D2_SPMV_MPI_SRC}); spmv_mpi target will be skipped.")
+  endif()
+
+  # ---- strong_matrix ----
+  if (EXISTS "${D2_STRONG_MATRIX_SRC}")
+    add_executable(strong_matrix "${D2_STRONG_MATRIX_SRC}")
+    target_link_libraries(strong_matrix PRIVATE MPI::MPI_CXX mmio)
+
+    if(PARCO_BUILD_OMP)
+      parco_link_openmp(strong_matrix)
+    endif()
+
+    parco_release_flags(strong_matrix)
+    parco_fix_filesystem(strong_matrix)
+
+    message(STATUS "D2 target enabled: strong_matrix")
+  else()
+    message(STATUS "D2 source not found (${D2_STRONG_MATRIX_SRC}); strong_matrix target will be skipped.")
   endif()
 endif()
 
@@ -204,6 +222,7 @@ endif()
 # Install (optional)
 # ============================================================
 set(_ALL_TARGETS spmv_csr)
+
 if (TARGET custom_matrix)
   list(APPEND _ALL_TARGETS custom_matrix)
 endif()
@@ -212,6 +231,9 @@ if (TARGET make_matrices)
 endif()
 if (TARGET spmv_mpi)
   list(APPEND _ALL_TARGETS spmv_mpi)
+endif()
+if (TARGET strong_matrix)
+  list(APPEND _ALL_TARGETS strong_matrix)
 endif()
 
 install(TARGETS ${_ALL_TARGETS} RUNTIME DESTINATION bin)
