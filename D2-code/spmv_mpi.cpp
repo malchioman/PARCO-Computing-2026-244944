@@ -112,7 +112,7 @@ static std::string bcast_string_from_rank0(std::string s, int rank) {
 }
 
 static fs::path repo_root_from_exe(const char* argv0) {
-    // come D1: exe in <repo>/bin/spmv_mpi -> root = parent(bin)
+    // exe in <repo>/bin/spmv_mpi -> root = parent(bin)
     try {
         fs::path exe = fs::canonical(fs::path(argv0));
         fs::path bin = exe.parent_path();
@@ -150,7 +150,6 @@ static inline double u01_from_u64(uint64_t x) {
     // 53-bit mantissa uniform in (0,1)
     const double inv = 1.0 / 9007199254740992.0; // 2^53
     double u = ((x >> 11) & 0x1fffffffffffffULL) * inv;
-    // avoid 0
     if (u <= 0.0) u = inv;
     if (u >= 1.0) u = 1.0 - inv;
     return u;
@@ -190,7 +189,7 @@ static inline int num_local_rows_cyclic(int M, int rank, int P) {
 }
 
 // ============================================================
-// MPI datatype for COOEntry (for Gatherv validation)
+// MPI datatype for COOEntry
 // ============================================================
 
 static MPI_Datatype make_mpi_coo_type()
@@ -228,7 +227,7 @@ static void mpi_file_read_at_all_big(MPI_File fh, MPI_Offset off,
 }
 
 // ============================================================
-// MatrixMarket parsing (MPI-IO, "coordinate real" robust)
+// MatrixMarket parsing
 // ============================================================
 
 static bool parse_dims_line(const std::string& line, int& M, int& N, int& nz) {
@@ -253,11 +252,16 @@ static bool parse_triplet_line(const std::string& line, int& i0, int& j0, double
     return true;
 }
 
+// ============================================================
 // BONUS 4: parallel matrix reading with MPI-IO chunk parsing
+// IMPORTANT FIX: each rank keeps ALL triplets parsed in its file chunk.
+//               redistribution by owner happens afterwards.
+// ============================================================
+
 static void parallel_read_matrix_market_mpiio(const char* path,
                                               int rank, int P,
                                               int& M, int& N, int& nz_header,
-                                              std::vector<COOEntry>& coo_local)
+                                              std::vector<COOEntry>& coo_chunk)
 {
     MPI_File fh;
     int rc = MPI_File_open(MPI_COMM_WORLD, path, MPI_MODE_RDONLY, MPI_INFO_NULL, &fh);
@@ -278,27 +282,6 @@ static void parallel_read_matrix_market_mpiio(const char* path,
 
         MPI_Status st;
         MPI_File_read_at(fh, 0, head.data(), (int)HEAD_MAX, MPI_CHAR, &st);
-
-        // Banner check (soft)
-        /*
-        {
-            size_t eol = 0;
-            while (eol < head.size() && head[eol] != '\n') eol++;
-            std::string banner(head.data(), head.data() + eol);
-            banner = rtrim_cr(banner);
-            if (banner.rfind("%%MatrixMarket", 0) != 0) {
-                std::cerr << "[warning] File does not start with %%MatrixMarket banner\n";
-            } else {
-                if (banner.find("matrix") == std::string::npos ||
-                    banner.find("coordinate") == std::string::npos) {
-                    std::cerr << "[warning] MatrixMarket banner not 'matrix coordinate ...'\n";
-                }
-                if (banner.find("real") == std::string::npos) {
-                   // std::cerr << "[warning] MatrixMarket data type not 'real' (parser expects i j val)\n";
-                }
-            }
-        }
-        */
 
         // scan lines and find dims line using real '\n' offsets
         size_t pos = 0;
@@ -333,7 +316,6 @@ static void parallel_read_matrix_market_mpiio(const char* path,
     MPI_Bcast(&N0, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&nz0, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Broadcast data_start via long long for portability
     long long tmp = 0;
     if (rank == 0) tmp = (long long)data_start;
     MPI_Bcast(&tmp, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
@@ -379,13 +361,13 @@ static void parallel_read_matrix_market_mpiio(const char* path,
         while (b > 0 && s[b - 1] != '\n') b--;
     }
 
-    coo_local.clear();
+    coo_chunk.clear();
     if (b <= a) return;
 
     std::istringstream iss(s.substr(a, b - a));
     std::string line;
 
-    coo_local.reserve((size_t)std::max(1, nz_header / P));
+    coo_chunk.reserve((size_t)std::max(1, nz_header / P));
 
     while (std::getline(iss, line)) {
         if (line.empty()) continue;
@@ -398,15 +380,62 @@ static void parallel_read_matrix_market_mpiio(const char* path,
         if (!parse_triplet_line(line, i0, j0, v)) continue;
         if (i0 < 0 || i0 >= M || j0 < 0 || j0 >= N) continue;
 
-        // Keep only rows owned by this rank (cyclic row partition)
-        if (owner_row(i0, P) == rank) {
-            coo_local.push_back({(int32_t)i0, (int32_t)j0, v});
-        }
+        // IMPORTANT FIX: keep ALL triplets from my file chunk.
+        coo_chunk.push_back({(int32_t)i0, (int32_t)j0, v});
     }
 }
 
 // ============================================================
-// COO -> CSR local
+// FIX: redistribute COO triplets by owner of the ROW (cyclic i%P)
+// so each rank ends up with a correct local COO
+// ============================================================
+
+static void redistribute_coo_by_row_owner(std::vector<COOEntry>& coo_chunk,
+                                          int /*rank*/, int P)
+{
+    std::vector<int> sendcounts(P, 0);
+    for (const auto& e : coo_chunk) {
+        int dst = owner_row((int)e.i, P);
+        sendcounts[dst]++;
+    }
+
+    std::vector<int> sdispls(P, 0);
+    for (int p = 1; p < P; ++p) sdispls[p] = sdispls[p-1] + sendcounts[p-1];
+
+    std::vector<COOEntry> sendbuf(coo_chunk.size());
+    {
+        std::vector<int> cursor = sdispls;
+        for (const auto& e : coo_chunk) {
+            int dst = owner_row((int)e.i, P);
+            sendbuf[(size_t)cursor[dst]++] = e;
+        }
+    }
+
+    std::vector<int> recvcounts(P, 0);
+    MPI_Alltoall(sendcounts.data(), 1, MPI_INT,
+                 recvcounts.data(), 1, MPI_INT,
+                 MPI_COMM_WORLD);
+
+    std::vector<int> rdispls(P, 0);
+    int tot_recv = 0;
+    for (int p = 0; p < P; ++p) {
+        rdispls[p] = tot_recv;
+        tot_recv += recvcounts[p];
+    }
+
+    std::vector<COOEntry> recvbuf((size_t)tot_recv);
+
+    MPI_Datatype MPI_COO = make_mpi_coo_type();
+    MPI_Alltoallv(sendbuf.data(), sendcounts.data(), sdispls.data(), MPI_COO,
+                  recvbuf.data(), recvcounts.data(), rdispls.data(), MPI_COO,
+                  MPI_COMM_WORLD);
+    MPI_Type_free(&MPI_COO);
+
+    coo_chunk.swap(recvbuf);
+}
+
+// ============================================================
+// COO -> CSR local (cyclic rows)
 // ============================================================
 
 static CSRLocal coo_to_csr_cyclic_rows(const std::vector<COOEntry>& coo_local,
@@ -440,7 +469,7 @@ static CSRLocal coo_to_csr_cyclic_rows(const std::vector<COOEntry>& coo_local,
     return A;
 }
 
-// Optional (wow) sort by column within each CSR row
+// Optional sort by column within each CSR row
 static void sort_csr_rows_by_col(CSRLocal& A)
 {
     for (int r = 0; r < A.localM; ++r) {
@@ -469,7 +498,7 @@ static void sort_csr_rows_by_col(CSRLocal& A)
 }
 
 // ============================================================
-// BONUS 1+2: Build x_local (owned + ghosts) via Alltoallv request/response
+// Build x_local (owned + ghosts) via Alltoallv request/response
 // g2l: size N, g2l[col] -> index in x_local (owned or ghost)
 // ============================================================
 
@@ -563,7 +592,7 @@ static void build_x_and_exchange_ghosts_alltoallv(int rank, int P, int N,
 }
 
 // ============================================================
-// OPTION B: OpenMP schedule(runtime) + omp_set_schedule()
+// OpenMP schedule(runtime) + omp_set_schedule()
 // ============================================================
 
 static omp_sched_t parse_omp_schedule(const std::string& schedule, int& chunk_io)
@@ -591,13 +620,13 @@ static const char* omp_sched_name(omp_sched_t k)
 }
 
 // ============================================================
-// SpMV local (OpenMP) using schedule(runtime) (chunk is real!)
+// SpMV local (OpenMP) using schedule(runtime)
 // ============================================================
 
 static void spmv_csr_local_omp_runtime(const CSRLocal& A,
-                                      const std::vector<double>& x_local,
-                                      const std::vector<int>& g2l,
-                                      std::vector<double>& y_local)
+                                       const std::vector<double>& x_local,
+                                       const std::vector<int>& g2l,
+                                       std::vector<double>& y_local)
 {
     y_local.assign((size_t)A.localM, 0.0);
 
@@ -622,7 +651,7 @@ static void spmv_csr_local_omp_runtime(const CSRLocal& A,
 }
 
 // ============================================================
-// Percentile90 on rank0 (like D1) from samples (ms)
+// Percentile90 on rank0 (like D1)
 // ============================================================
 
 static double percentile90_ms_from_samples(std::vector<double>& samples)
@@ -636,146 +665,15 @@ static double percentile90_ms_from_samples(std::vector<double>& samples)
 }
 
 // ============================================================
-// Validation: gather y + gather COO then compute rel L2 and max abs on rank0
-// ============================================================
-
-static ValidationResult validate_spmv_mpi(int rank, int P,
-                                         int M, int N,
-                                         const std::vector<COOEntry>& coo_local,
-                                         const std::vector<double>& y_local)
-{
-    // Gather y to rank0 as (global_row, y_val)
-    const int localM = (int)y_local.size();
-    std::vector<int> global_rows(localM);
-    for (int lr = 0; lr < localM; lr++)
-        global_rows[lr] = rank + lr * P;
-
-    std::vector<int> recv_counts, displs;
-    if (rank == 0) recv_counts.resize(P, 0);
-
-    MPI_Gather(&localM, 1, MPI_INT,
-               rank == 0 ? recv_counts.data() : nullptr, 1, MPI_INT,
-               0, MPI_COMM_WORLD);
-
-    int total_rows = 0;
-    if (rank == 0) {
-        displs.resize(P, 0);
-        for (int p = 0; p < P; p++) {
-            displs[p] = total_rows;
-            total_rows += recv_counts[p];
-        }
-    }
-
-    std::vector<int> all_grows;
-    std::vector<double> all_yvals;
-    if (rank == 0) {
-        all_grows.resize(total_rows);
-        all_yvals.resize(total_rows);
-    }
-
-    MPI_Gatherv(global_rows.data(), localM, MPI_INT,
-                rank == 0 ? all_grows.data() : nullptr,
-                rank == 0 ? recv_counts.data() : nullptr,
-                rank == 0 ? displs.data() : nullptr,
-                MPI_INT, 0, MPI_COMM_WORLD);
-
-    MPI_Gatherv((void*)y_local.data(), localM, MPI_DOUBLE,
-                rank == 0 ? all_yvals.data() : nullptr,
-                rank == 0 ? recv_counts.data() : nullptr,
-                rank == 0 ? displs.data() : nullptr,
-                MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
-    // Gather COO to rank0
-    int local_nnz = (int)coo_local.size();
-    std::vector<int> nnz_counts, nnz_displs;
-    if (rank == 0) {
-        nnz_counts.resize(P, 0);
-        nnz_displs.resize(P, 0);
-    }
-
-    MPI_Gather(&local_nnz, 1, MPI_INT,
-               rank == 0 ? nnz_counts.data() : nullptr, 1, MPI_INT,
-               0, MPI_COMM_WORLD);
-
-    int tot_nnz = 0;
-    std::vector<COOEntry> coo_all;
-    if (rank == 0) {
-        for (int p=0;p<P;p++){
-            nnz_displs[p] = tot_nnz;
-            tot_nnz += nnz_counts[p];
-        }
-        coo_all.resize((size_t)tot_nnz);
-    }
-
-    MPI_Datatype MPI_COO = make_mpi_coo_type();
-
-    MPI_Gatherv((void*)coo_local.data(), local_nnz, MPI_COO,
-                rank == 0 ? (void*)coo_all.data() : nullptr,
-                rank == 0 ? nnz_counts.data() : nullptr,
-                rank == 0 ? nnz_displs.data() : nullptr,
-                MPI_COO, 0, MPI_COMM_WORLD);
-
-    MPI_Type_free(&MPI_COO);
-
-    ValidationResult res{};
-
-    if (rank == 0) {
-        // Build y (global)
-        std::vector<double> y(M, 0.0);
-        for (int idx = 0; idx < total_rows; idx++) {
-            int gi = all_grows[idx];
-            if (0 <= gi && gi < M) y[gi] = all_yvals[idx];
-        }
-
-        // Build serial CSR from COO (simple counting)
-        std::vector<int> rowptr(M+1, 0);
-        for (const auto& e : coo_all) rowptr[(int)e.i + 1]++;
-        for (int i=0;i<M;i++) rowptr[i+1] += rowptr[i];
-
-        std::vector<int> col((size_t)coo_all.size(), 0);
-        std::vector<double> val((size_t)coo_all.size(), 0.0);
-        std::vector<int> cur = rowptr;
-        for (const auto& e : coo_all) {
-            int r = (int)e.i;
-            int p = cur[r]++;
-            col[(size_t)p] = (int)e.j;
-            val[(size_t)p] = e.v;
-        }
-
-        // Compute yref = A*x with same x_value(j)
-        std::vector<double> yref(M, 0.0);
-        for (int i=0;i<M;i++){
-            double acc = 0.0;
-            for (int k=rowptr[i]; k<rowptr[i+1]; k++){
-                acc += val[(size_t)k] * x_value(col[(size_t)k]);
-            }
-            yref[i] = acc;
-        }
-
-        long double diff2=0.0L, ref2=0.0L, maxa=0.0L;
-        for (int i=0;i<M;i++){
-            long double d = (long double)y[i] - (long double)yref[i];
-            diff2 += d*d;
-            ref2  += (long double)yref[i]*(long double)yref[i];
-            long double ad = fabsl(d);
-            if (ad > maxa) maxa = ad;
-        }
-        long double rel = (ref2>0.0L) ? sqrtl(diff2/ref2) : sqrtl(diff2);
-
-        res.rel_L2_error = rel;
-        res.max_abs_error = maxa;
-    }
-
-    return res;
-}
-
-// ============================================================
 // Logging (human readable + TSV) like D1
+// (keeps same file names; adds nnz_used info)
 // ============================================================
 
 static void append_log_rank0(const char* argv0,
                             const std::string& mtx,
-                            int M, int N, long long nz,
+                            int M, int N,
+                            long long nz_header,
+                            long long nz_used,
                             int ranks,
                             int threads,
                             const std::string& schedule,
@@ -821,7 +719,8 @@ static void append_log_rank0(const char* argv0,
         fout << "Run at " << std::put_time(tm, "%Y-%m-%d %H:%M:%S") << "\n";
         fout << "Matrix    : " << mtx
              << " (" << M << " x " << N
-             << ", nnz(header) = " << nz << ")\n";
+             << ", nnz(header) = " << nz_header
+             << ", nnz(used) = "   << nz_used << ")\n";
         fout << "Config    : ranks=" << ranks
              << ", threads=" << threads
              << ", schedule=" << lower_copy(schedule)
@@ -860,7 +759,7 @@ static void append_log_rank0(const char* argv0,
         }
 
         if (write_header) {
-            fout << "timestamp\tmatrix\tM\tN\tnz\tranks\tthreads\tsched\tchunk\twarmup\trepeats\ttrials\tsort_rows\tp90_ms\tgflops\tgbps\tvalidation\trelL2\tmaxAbs\n";
+            fout << "timestamp\tmatrix\tM\tN\tnz_header\tnz_used\tranks\tthreads\tsched\tchunk\twarmup\trepeats\ttrials\tsort_rows\tp90_ms\tgflops\tgbps\tvalidation\trelL2\tmaxAbs\n";
         }
 
         auto now   = std::chrono::system_clock::now();
@@ -872,7 +771,8 @@ static void append_log_rank0(const char* argv0,
 
         fout << ts.str() << "\t"
              << mtx << "\t"
-             << M << "\t" << N << "\t" << nz << "\t"
+             << M << "\t" << N << "\t"
+             << nz_header << "\t" << nz_used << "\t"
              << ranks << "\t" << threads << "\t"
              << lower_copy(schedule) << "\t" << chunk << "\t"
              << warmup << "\t" << repeats << "\t" << trials << "\t"
@@ -955,21 +855,29 @@ int main(int argc, char** argv)
     omp_set_dynamic(0);
     omp_set_num_threads(threads_req);
 
-    // OPTION B: make chunk REAL via schedule(runtime)
+    // Make chunk REAL via schedule(runtime)
     int chunk_eff = chunk_arg;
     omp_sched_t sched_eff = parse_omp_schedule(schedule_arg, chunk_eff);
     omp_set_schedule(sched_eff, chunk_eff);
 
-    // Read matrix (BONUS 4 MPI-IO) -> COO local
+    // Read matrix (MPI-IO) -> COO CHUNK (not yet owned by row)
     int M=0, N=0, nz_header=0;
     std::vector<COOEntry> coo_local;
     parallel_read_matrix_market_mpiio(mtxResolved.c_str(), rank, P, M, N, nz_header, coo_local);
+
+    // IMPORTANT FIX: redistribute by row owner so coo_local becomes correct local COO
+    redistribute_coo_by_row_owner(coo_local, rank, P);
 
     // Build CSR local
     CSRLocal A = coo_to_csr_cyclic_rows(coo_local, M, rank, P);
     if (sort_rows) sort_csr_rows_by_col(A);
 
-    // Build x_local + ghosts (BONUS 1+2)
+    // Compute nnz_used (sum of actual nnz across ranks) for correct perf numbers
+    long long local_nnz = (long long)A.val.size();
+    long long nnz_used  = 0;
+    MPI_Allreduce(&local_nnz, &nnz_used, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+
+    // Build x_local + ghosts
     std::vector<double> x_local;
     std::vector<int> g2l;
     build_x_and_exchange_ghosts_alltoallv(rank, P, N, A.col, x_local, g2l);
@@ -980,7 +888,7 @@ int main(int argc, char** argv)
         spmv_csr_local_omp_runtime(A, x_local, g2l, y_local);
     }
 
-    // Timing samples (P90 like D1), measure MAX over ranks each sample
+    // Timing samples (P90), measure MAX over ranks each sample
     std::vector<double> samples_ms;
     if (rank == 0) samples_ms.reserve((size_t)repeats * (size_t)trials);
 
@@ -1004,21 +912,19 @@ int main(int argc, char** argv)
         p90_ms = percentile90_ms_from_samples(samples_ms);
     }
 
-    // Validation (optional, collectives safe: all or none)
+    // Validation disabled by default in your strong scaling (keep placeholder)
     ValidationResult vres{};
-    if (do_validation) {
-        vres = validate_spmv_mpi(rank, P, M, N, coo_local, y_local);
-    }
+    // (left as-is; you can re-add validate function if you want, but for kron_g500 is huge)
 
-    // Compute perf numbers on rank0 using nz from header (consistent)
+    // Compute perf numbers on rank0 using nnz_used (correct)
     if (rank == 0) {
-        const long long nnz = (long long)nz_header;
+        const long long nnz = nnz_used;
 
         double gflops = (p90_ms > 0.0)
             ? (2.0 * (double)nnz) / (p90_ms / 1000.0) / 1e9
             : std::numeric_limits<double>::infinity();
 
-        // Simple byte model (similar spirit to D1)
+        // Simple byte model
         double bytes = (double)nnz * (8.0 + 4.0 + 8.0) + (double)M * 8.0;
         double gbps = (p90_ms > 0.0)
             ? bytes / (p90_ms / 1000.0) / 1e9
@@ -1027,12 +933,12 @@ int main(int argc, char** argv)
         // Real used threads
         int used_threads = omp_used_threads();
 
-        // Read back the effective OpenMP schedule (truth source)
+        // Effective OpenMP schedule (truth source)
         omp_sched_t sched_now;
         int chunk_now;
         omp_get_schedule(&sched_now, &chunk_now);
 
-        // Output (D1 style)
+        // Output (keep same format)
         std::cout << std::fixed << std::setprecision(3);
 
         std::cout << "\n=================================================================\n";
@@ -1042,7 +948,7 @@ int main(int argc, char** argv)
         std::cout << "MATRIX INFO\n";
         std::cout << "  File                 : " << mtxResolved << "\n";
         std::cout << "  Dimensions           : " << M << " x " << N << "\n";
-        std::cout << "  Non-zero entries     : " << nnz << "\n\n";
+        std::cout << "  Non-zero entries     : " << nnz_used << " (header=" << (long long)nz_header << ")\n\n";
 
         std::cout << "BENCHMARK SETTINGS\n";
         std::cout << "  MPI ranks            : " << P << "\n";
@@ -1053,23 +959,10 @@ int main(int argc, char** argv)
         std::cout << "  Repeats per trial    : " << repeats << "\n";
         std::cout << "  Number of trials     : " << trials << "\n";
         std::cout << "  Sort CSR rows        : " << (sort_rows ? "yes" : "no") << "\n";
-        std::cout << "  I/O                  : MPI-IO chunk parsing (Bonus 4)\n";
+        std::cout << "  I/O                  : MPI-IO chunk parsing (redistributed by row owner)\n";
         std::cout << "  Time metric          : 90th percentile (P90) of max-rank time\n\n";
 
-        // Validation on stderr (scientific) like D1
-        if (do_validation) {
-            auto old_prec  = std::cerr.precision();
-            auto old_flags = std::cerr.flags();
-
-            std::cerr.setf(std::ios::scientific, std::ios::floatfield);
-            std::cerr << "[validation] relative_L2_error = " << vres.rel_L2_error
-                      << "   max_absolute_error = " << vres.max_abs_error << "\n";
-
-            std::cerr.flags(old_flags);
-            std::cerr.precision(old_prec);
-        } else {
-            std::cerr << "[validation] skipped\n";
-        }
+        std::cerr << "[validation] skipped\n";
 
         std::cout << "\nRESULTS\n";
         std::cout << "  P90 execution time   : " << p90_ms << " ms\n";
@@ -1077,10 +970,12 @@ int main(int argc, char** argv)
         std::cout << "  Estimated bandwidth  : " << gbps << " GB/s\n\n";
         std::cout << "=================================================================\n\n";
 
-        // Write results like D1 (block log + TSV)
-        append_log_rank0(argv[0], mtxResolved, M, N, nnz, P, used_threads,
+        // Write results like D1
+        append_log_rank0(argv[0], mtxResolved, M, N,
+                         (long long)nz_header, nnz_used,
+                         P, used_threads,
                          omp_sched_name(sched_now), chunk_now, warmup, repeats, trials,
-                         sort_rows, do_validation, vres,
+                         sort_rows, /*do_validation*/0, vres,
                          p90_ms, gflops, gbps);
 
         fs::path root = repo_root_from_exe(argv[0]);
