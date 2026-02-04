@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_NUMERIC=C
 
 EXE=${EXE:-"./bin/spmv_mpi"}
 MATRIX=${1:-"bin/matrices/kron_g500-logn21.mtx"}
@@ -38,13 +39,61 @@ fi
   echo "repeats: $REPEATS trials: $TRIALS"
   echo "P list: ${PROCS_LIST[*]}"
   echo
-  printf "P\tp90_ms\tgflops\tgbps\n"
+  printf "P\tp90_e2e_ms\tp90_compute_ms\tp90_comm_ms\tgflops_e2e\tgbps_e2e\tgflops_compute\tgbps_compute\n"
 } > "$OUTFILE"
+
+extract_number() {
+  # $1 = regex/pattern, returns first numeric token after ':'
+  echo "$OUT" | awk -F':' -v pat="$1" '
+    $0 ~ pat {
+      s=$2
+      gsub(/[^0-9eE\.\+\-]/, "", s)
+      if (s != "") { print s; exit }
+    }'
+}
+
+extract_M() {
+  echo "$OUT" | awk '
+    /Dimensions/ {
+      s=$0
+      gsub(/[^0-9]/, " ", s)
+      split(s,a," ")
+      for(i=1;i<=length(a);i++) if(a[i]!=""){ print a[i]; exit }
+    }'
+}
+
+extract_nnz_used() {
+  echo "$OUT" | awk '
+    /Non-zero entries/ {
+      # prende il primo numero dopo i ":" (nnz_used), ignorando header=...
+      split($0, parts, ":")
+      s=parts[2]
+      gsub(/[^0-9]/, " ", s)
+      split(s,a," ")
+      for(i=1;i<=length(a);i++) if(a[i]!=""){ print a[i]; exit }
+    }'
+}
+
+calc_gflops() {
+  # nnz, t_ms
+  awk -v nnz="$1" -v tms="$2" 'BEGIN{
+    if (tms<=0) { print "inf"; exit }
+    printf "%.6f", (2.0*nnz)/((tms/1000.0)*1e9)
+  }'
+}
+
+calc_gbps() {
+  # nnz, M, t_ms  (byte model: nnz*(8+4+8) + M*8)
+  awk -v nnz="$1" -v M="$2" -v tms="$3" 'BEGIN{
+    if (tms<=0) { print "inf"; exit }
+    bytes = nnz*(8+4+8) + M*8
+    printf "%.6f", bytes/((tms/1000.0)*1e9)
+  }'
+}
 
 for P in "${PROCS_LIST[@]}"; do
   echo "[run] P=$P ..." >> "$OUTFILE"
 
-  # Per strong scaling “pulito”: fino a 72 metti tutto su 1 nodo, oltre lasciamo che usi entrambi.
   MAP_ARGS=()
   if [[ "$P" -le 72 ]]; then
     MAP_ARGS=(--map-by "ppr:${P}:node:pe=1" --bind-to core)
@@ -52,7 +101,6 @@ for P in "${PROCS_LIST[@]}"; do
     MAP_ARGS=(--map-by "ppr:72:node:pe=1" --bind-to core)
   fi
 
-  # IMPORTANT: in PBS NON forzare hostfile, lascia che OpenMPI usi l’allocazione PBS.
   set +e
   OUT=$(mpirun -np "$P" "${MAP_ARGS[@]}" "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate 2>&1)
   RC=$?
@@ -64,17 +112,38 @@ for P in "${PROCS_LIST[@]}"; do
     exit $RC
   fi
 
-  P90=$(echo "$OUT" | awk -F':' '/P90 execution time/ {gsub(/ ms/,"",$2); sub(/^[ \t]+/,"",$2); print $2}')
-  GF=$(echo "$OUT"  | awk -F':' '/Throughput/        {gsub(/ GFLOPS/,"",$2); sub(/^[ \t]+/,"",$2); print $2}')
-  GB=$(echo "$OUT"  | awk -F':' '/Estimated bandwidth/ {gsub(/ GB\/s/,"",$2); sub(/^[ \t]+/,"",$2); print $2}')
+  # Times (ms)
+  P90_E2E=$(extract_number "P90 execution time")
+  P90_COMP=$(extract_number "Compute-only P90 time")
+  P90_COMM=$(extract_number "Comm-only P90 time")
 
-  if [[ -z "${P90:-}" || -z "${GF:-}" || -z "${GB:-}" ]]; then
-    echo "[fatal] parsing failed at P=$P. Full program output:" >> "$OUTFILE"
+  # Backward compatibility (se non trovi le nuove righe)
+  if [[ -z "${P90_E2E:-}" ]]; then
+    echo "[fatal] parsing failed at P=$P (missing P90 execution time). Full output:" >> "$OUTFILE"
+    echo "$OUT" >> "$OUTFILE"
+    exit 2
+  fi
+  if [[ -z "${P90_COMP:-}" ]]; then P90_COMP="$P90_E2E"; fi
+  if [[ -z "${P90_COMM:-}" ]]; then P90_COMM="0"; fi
+
+  # Parse M and nnz_used from program output (serve per ricalcolare GF/GB su entrambe le metriche)
+  M=$(extract_M)
+  NNZ=$(extract_nnz_used)
+
+  if [[ -z "${M:-}" || -z "${NNZ:-}" ]]; then
+    echo "[fatal] parsing failed at P=$P (missing Dimensions or Non-zero entries). Full output:" >> "$OUTFILE"
     echo "$OUT" >> "$OUTFILE"
     exit 2
   fi
 
-  printf "%s\t%s\t%s\t%s\n" "$P" "$P90" "$GF" "$GB" >> "$OUTFILE"
+  GF_E2E=$(calc_gflops "$NNZ" "$P90_E2E")
+  GB_E2E=$(calc_gbps   "$NNZ" "$M" "$P90_E2E")
+  GF_COMP=$(calc_gflops "$NNZ" "$P90_COMP")
+  GB_COMP=$(calc_gbps   "$NNZ" "$M" "$P90_COMP")
+
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$P" "$P90_E2E" "$P90_COMP" "$P90_COMM" \
+    "$GF_E2E" "$GB_E2E" "$GF_COMP" "$GB_COMP" >> "$OUTFILE"
 done
 
 echo "Saved results to: $OUTFILE"
