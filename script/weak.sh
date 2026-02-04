@@ -11,7 +11,6 @@ CHUNK=${CHUNK:-64}
 REPEATS=${REPEATS:-10}
 TRIALS=${TRIALS:-5}
 
-# Weak scaling knobs (work per rank ~ costante)
 ROWS_PER_RANK=${ROWS_PER_RANK:-16384}
 NNZ_PER_RANK=${NNZ_PER_RANK:-1000000}
 
@@ -31,26 +30,13 @@ if [[ ! -x "$EXE" ]]; then
   exit 1
 fi
 if [[ ! -x "$GEN" ]]; then
-  echo "[fatal] matrix generator not found: $GEN" >&2
+  echo "[fatal] generator not found/executable: $GEN" >&2
   exit 1
 fi
 
-# Header
-{
-  echo "==== Weak Scaling Run ===="
-  echo "date: $(date)"
-  echo "host: $(hostname)"
-  echo "exe: $EXE"
-  echo "gen: $GEN"
-  echo "threads: $THREADS"
-  echo "schedule: $SCHED chunk=$CHUNK"
-  echo "repeats: $REPEATS trials: $TRIALS"
-  echo "rows_per_rank: $ROWS_PER_RANK"
-  echo "nnz_per_rank:  $NNZ_PER_RANK"
-  echo "P list: ${PROCS_LIST[*]}"
-  echo
-  printf "P\trows\tcols\tnnz\tp90_e2e_ms\tp90_compute_ms\tp90_comm_ms\tgflops_e2e\tgbps_e2e\tgflops_compute\tgbps_compute\n"
-} > "$OUTFILE"
+# --- pretty table formatting ---
+HDR_FMT="%-4s %10s %10s %12s %12s %14s %12s %12s %12s %15s %15s\n"
+ROW_FMT="%-4s %10s %10s %12s %12s %14s %12s %12s %12s %15s %15s\n"
 
 extract_number() {
   echo "$OUT" | awk -F':' -v pat="$1" '
@@ -97,21 +83,47 @@ calc_gbps() {
   }'
 }
 
+# Header
+{
+  echo "==== Weak Scaling Run ===="
+  echo "date: $(date)"
+  echo "host: $(hostname)"
+  echo "exe: $EXE"
+  echo "gen: $GEN"
+  echo "threads: $THREADS"
+  echo "schedule: $SCHED chunk=$CHUNK"
+  echo "repeats: $REPEATS trials: $TRIALS"
+  echo "rows_per_rank: $ROWS_PER_RANK"
+  echo "nnz_per_rank:  $NNZ_PER_RANK"
+  echo "P list: ${PROCS_LIST[*]}"
+  echo
+  printf "$HDR_FMT" \
+    "P" "rows" "cols" "nnz" \
+    "p90_e2e_ms" "p90_compute_ms" "p90_comm_ms" \
+    "gflops_e2e" "gbps_e2e" "gflops_compute" "gbps_compute"
+} > "$OUTFILE"
+
 for P in "${PROCS_LIST[@]}"; do
-  # Weak scaling: rows e nnz crescono linearmente con P
-  ROWS=$(( ROWS_PER_RANK * P ))
-  COLS=$ROWS
-  NNZ=$(( NNZ_PER_RANK  * P ))
+  # Weak scaling: local rows constant => global rows = rows_per_rank * P
+  M=$((ROWS_PER_RANK * P))
+  N=$M
+  NNZ=$((NNZ_PER_RANK * P))
 
-  # Nome matrice unico
-  NAME="weak_P${P}_rpr${ROWS_PER_RANK}_nnzpr${NNZ_PER_RANK}.mtx"
+  OUTNAME="weak_P${P}_rpr${ROWS_PER_RANK}_nnzpr${NNZ_PER_RANK}.mtx"
+  OUTPATH="bin/matrices/${OUTNAME}"
 
-  echo "[gen] P=$P -> $NAME (rows=$ROWS cols=$COLS nnz=$NNZ)" >> "$OUTFILE"
-  "$GEN" "$ROWS" "$COLS" "$NNZ" "$NAME" >/dev/null
+  echo "[gen] P=$P -> $OUTPATH (rows=$M cols=$N nnz=$NNZ)" >&2
+  "$GEN" "$OUTPATH" "$M" "$N" "$NNZ" >/dev/null
 
-  MATRIX="bin/matrices/$NAME"
+  if [[ ! -f "$OUTPATH" ]]; then
+    {
+      echo
+      echo "[fatal] generator did not create expected file: $OUTPATH"
+    } >> "$OUTFILE"
+    exit 2
+  fi
 
-  echo "[run] P=$P ..." >> "$OUTFILE"
+  echo "[run] P=$P ..." >&2
 
   MAP_ARGS=()
   if [[ "$P" -le 72 ]]; then
@@ -121,46 +133,40 @@ for P in "${PROCS_LIST[@]}"; do
   fi
 
   set +e
-  OUT=$(mpirun -np "$P" "${MAP_ARGS[@]}" "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate 2>&1)
+  OUT=$(mpirun -np "$P" "${MAP_ARGS[@]}" "$EXE" "$OUTPATH" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate 2>&1)
   RC=$?
   set -e
 
   if [[ $RC -ne 0 ]]; then
-    echo "[fatal] mpirun failed at P=$P (rc=$RC). Output:" >> "$OUTFILE"
-    echo "$OUT" >> "$OUTFILE"
+    {
+      echo
+      echo "[fatal] mpirun failed at P=$P (rc=$RC). Output:"
+      echo "$OUT"
+    } >> "$OUTFILE"
     exit $RC
   fi
 
+  # parse times
   P90_E2E=$(extract_number "P90 execution time")
   P90_COMP=$(extract_number "Compute-only P90 time")
   P90_COMM=$(extract_number "Comm-only P90 time")
+  [[ -n "${P90_COMP:-}" ]] || P90_COMP="$P90_E2E"
+  [[ -n "${P90_COMM:-}" ]] || P90_COMM="0"
 
-  if [[ -z "${P90_E2E:-}" ]]; then
-    echo "[fatal] parsing failed at P=$P (missing P90 execution time). Full output:" >> "$OUTFILE"
-    echo "$OUT" >> "$OUTFILE"
-    exit 2
-  fi
-  if [[ -z "${P90_COMP:-}" ]]; then P90_COMP="$P90_E2E"; fi
-  if [[ -z "${P90_COMM:-}" ]]; then P90_COMM="0"; fi
-
-  # Prendiamo M e nnz_usato dal programma (è più robusto che fidarsi di NNZ teorico)
+  # parse M + nnz_used from program output (robusto)
   M_OUT=$(extract_M)
-  NNZ_OUT=$(extract_nnz_used)
-  if [[ -z "${M_OUT:-}" || -z "${NNZ_OUT:-}" ]]; then
-    echo "[fatal] parsing failed at P=$P (missing Dimensions or Non-zero entries). Full output:" >> "$OUTFILE"
-    echo "$OUT" >> "$OUTFILE"
-    exit 2
-  fi
+  NNZ_USED=$(extract_nnz_used)
+  [[ -n "${M_OUT:-}" && -n "${NNZ_USED:-}" ]] || { echo "[fatal] parsing M/nnz failed at P=$P" >&2; exit 2; }
 
-  GF_E2E=$(calc_gflops "$NNZ_OUT" "$P90_E2E")
-  GB_E2E=$(calc_gbps   "$NNZ_OUT" "$M_OUT" "$P90_E2E")
-  GF_COMP=$(calc_gflops "$NNZ_OUT" "$P90_COMP")
-  GB_COMP=$(calc_gbps   "$NNZ_OUT" "$M_OUT" "$P90_COMP")
+  GF_E2E=$(calc_gflops "$NNZ_USED" "$P90_E2E")
+  GB_E2E=$(calc_gbps   "$NNZ_USED" "$M_OUT" "$P90_E2E")
+  GF_COMP=$(calc_gflops "$NNZ_USED" "$P90_COMP")
+  GB_COMP=$(calc_gbps   "$NNZ_USED" "$M_OUT" "$P90_COMP")
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
-    "$P" "$ROWS" "$COLS" "$NNZ_OUT" \
+  printf "$ROW_FMT" \
+    "$P" "$M_OUT" "$M_OUT" "$NNZ_USED" \
     "$P90_E2E" "$P90_COMP" "$P90_COMM" \
     "$GF_E2E" "$GB_E2E" "$GF_COMP" "$GB_COMP" >> "$OUTFILE"
 done
 
-echo "Saved results to: $OUTFILE"
+echo "Saved results to: $OUTFILE" >&2

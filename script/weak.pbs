@@ -6,7 +6,6 @@
 #PBS -j oe
 #PBS -o logs/weak.out
 
-# OpenMPI “safe” settings (come strong)
 export OMPI_MCA_oob=tcp
 export OMPI_MCA_btl=self,tcp
 export OMPI_MCA_mpi_cuda_support=0
@@ -19,11 +18,11 @@ module load gcc91
 module load openmpi-3.0.0--gcc-9.1.0
 module load cmake-3.15.4
 
-mkdir -p logs results bin/matrices
+mkdir -p logs results
 chmod +x script/weak.sh
 
-# Weak scaling knobs (puoi cambiarli qui)
-export BASE_ROWS_PER_RANK=4096
-export NNZ_PER_ROW=16
+# Parametri weak (puoi cambiarli qui)
+export ROWS_PER_RANK=16384
+export NNZ_PER_RANK=1000000
 
 ./script/weak.sh

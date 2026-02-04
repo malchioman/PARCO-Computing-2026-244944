@@ -27,6 +27,10 @@ if [[ ! -x "$EXE" ]]; then
   exit 1
 fi
 
+# --- pretty table formatting (spaces + fixed widths) ---
+HDR_FMT="%-4s %12s %14s %12s %12s %12s %15s %15s\n"
+ROW_FMT="%-4s %12s %14s %12s %12s %12s %15s %15s\n"
+
 # Header
 {
   echo "==== Strong Scaling Run ===="
@@ -39,7 +43,9 @@ fi
   echo "repeats: $REPEATS trials: $TRIALS"
   echo "P list: ${PROCS_LIST[*]}"
   echo
-  printf "P\tp90_e2e_ms\tp90_compute_ms\tp90_comm_ms\tgflops_e2e\tgbps_e2e\tgflops_compute\tgbps_compute\n"
+  printf "$HDR_FMT" \
+    "P" "p90_e2e_ms" "p90_compute_ms" "p90_comm_ms" \
+    "gflops_e2e" "gbps_e2e" "gflops_compute" "gbps_compute"
 } > "$OUTFILE"
 
 extract_number() {
@@ -65,7 +71,6 @@ extract_M() {
 extract_nnz_used() {
   echo "$OUT" | awk '
     /Non-zero entries/ {
-      # prende il primo numero dopo i ":" (nnz_used), ignorando header=...
       split($0, parts, ":")
       s=parts[2]
       gsub(/[^0-9]/, " ", s)
@@ -75,7 +80,6 @@ extract_nnz_used() {
 }
 
 calc_gflops() {
-  # nnz, t_ms
   awk -v nnz="$1" -v tms="$2" 'BEGIN{
     if (tms<=0) { print "inf"; exit }
     printf "%.6f", (2.0*nnz)/((tms/1000.0)*1e9)
@@ -83,7 +87,6 @@ calc_gflops() {
 }
 
 calc_gbps() {
-  # nnz, M, t_ms  (byte model: nnz*(8+4+8) + M*8)
   awk -v nnz="$1" -v M="$2" -v tms="$3" 'BEGIN{
     if (tms<=0) { print "inf"; exit }
     bytes = nnz*(8+4+8) + M*8
@@ -92,7 +95,7 @@ calc_gbps() {
 }
 
 for P in "${PROCS_LIST[@]}"; do
-  echo "[run] P=$P ..." >> "$OUTFILE"
+  echo "[run] P=$P ..." >&2   # progress in logs/strong.out, NOT in strong.txt
 
   MAP_ARGS=()
   if [[ "$P" -le 72 ]]; then
@@ -107,8 +110,11 @@ for P in "${PROCS_LIST[@]}"; do
   set -e
 
   if [[ $RC -ne 0 ]]; then
-    echo "[fatal] mpirun failed at P=$P (rc=$RC). Output:" >> "$OUTFILE"
-    echo "$OUT" >> "$OUTFILE"
+    {
+      echo
+      echo "[fatal] mpirun failed at P=$P (rc=$RC). Output:"
+      echo "$OUT"
+    } >> "$OUTFILE"
     exit $RC
   fi
 
@@ -117,33 +123,26 @@ for P in "${PROCS_LIST[@]}"; do
   P90_COMP=$(extract_number "Compute-only P90 time")
   P90_COMM=$(extract_number "Comm-only P90 time")
 
-  # Backward compatibility (se non trovi le nuove righe)
-  if [[ -z "${P90_E2E:-}" ]]; then
-    echo "[fatal] parsing failed at P=$P (missing P90 execution time). Full output:" >> "$OUTFILE"
-    echo "$OUT" >> "$OUTFILE"
-    exit 2
-  fi
-  if [[ -z "${P90_COMP:-}" ]]; then P90_COMP="$P90_E2E"; fi
-  if [[ -z "${P90_COMM:-}" ]]; then P90_COMM="0"; fi
+  # fallback (se non presenti le nuove righe)
+  [[ -n "${P90_E2E:-}" ]] || { echo "[fatal] missing P90 execution time at P=$P" >&2; exit 2; }
+  [[ -n "${P90_COMP:-}" ]] || P90_COMP="$P90_E2E"
+  [[ -n "${P90_COMM:-}" ]] || P90_COMM="0"
 
-  # Parse M and nnz_used from program output (serve per ricalcolare GF/GB su entrambe le metriche)
+  # Parse M and nnz_used from program output
   M=$(extract_M)
   NNZ=$(extract_nnz_used)
+  [[ -n "${M:-}" && -n "${NNZ:-}" ]] || { echo "[fatal] missing M/nnz at P=$P" >&2; exit 2; }
 
-  if [[ -z "${M:-}" || -z "${NNZ:-}" ]]; then
-    echo "[fatal] parsing failed at P=$P (missing Dimensions or Non-zero entries). Full output:" >> "$OUTFILE"
-    echo "$OUT" >> "$OUTFILE"
-    exit 2
-  fi
-
+  # Compute metrics for both times
   GF_E2E=$(calc_gflops "$NNZ" "$P90_E2E")
   GB_E2E=$(calc_gbps   "$NNZ" "$M" "$P90_E2E")
   GF_COMP=$(calc_gflops "$NNZ" "$P90_COMP")
   GB_COMP=$(calc_gbps   "$NNZ" "$M" "$P90_COMP")
 
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+  # Pretty aligned row
+  printf "$ROW_FMT" \
     "$P" "$P90_E2E" "$P90_COMP" "$P90_COMM" \
     "$GF_E2E" "$GB_E2E" "$GF_COMP" "$GB_COMP" >> "$OUTFILE"
 done
 
-echo "Saved results to: $OUTFILE"
+echo "Saved results to: $OUTFILE" >&2
