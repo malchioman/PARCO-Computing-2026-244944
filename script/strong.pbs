@@ -4,7 +4,7 @@
 #PBS -l select=2:ncpus=72:mpiprocs=72
 #PBS -l walltime=00:30:00
 #PBS -j oe
-#PBS -o logs/strong_${PBS_JOBID}.out
+#PBS -o logs/strong.out
 
 cd "$PBS_O_WORKDIR"
 set -euo pipefail
@@ -16,7 +16,5 @@ module load cmake-3.15.4
 
 mkdir -p logs results
 chmod +x script/strong.sh
-
-export OMPI_MCA_btl=^openib
 
 ./script/strong.sh bin/matrices/kron_g500-logn21.mtx

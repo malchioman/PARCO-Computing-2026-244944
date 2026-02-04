@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =========================
-# Config (puoi cambiare qui)
-# =========================
 EXE=${EXE:-"./bin/spmv_mpi"}
-MATRIX=${1:-"DIMACS10/kron_g500-logn21"}
+MATRIX=${1:-"bin/matrices/kron_g500-logn21.mtx"}
 
 THREADS=${THREADS:-1}
-SCHED=${SCHED:-static}     # static|dynamic|guided
+SCHED=${SCHED:-static}
 CHUNK=${CHUNK:-64}
 REPEATS=${REPEATS:-10}
 TRIALS=${TRIALS:-5}
@@ -17,44 +14,19 @@ PROCS_LIST=(${PROCS_LIST:-1 2 4 8 16 32 64 128})
 
 OUTDIR="results"
 OUTFILE="${OUTDIR}/strong.txt"
-
-# =========================
-# Checks
-# =========================
 mkdir -p "$OUTDIR"
 
-if [[ ! -x "$EXE" ]]; then
-  echo "[fatal] executable not found or not executable: $EXE" >&2
-  exit 1
-fi
-
-if [[ ! -f "$MATRIX" ]]; then
-  echo "[fatal] matrix not found: $MATRIX" >&2
-  echo "        (pass it as argument: ./script/strong.sh <matrix_path>)" >&2
-  exit 1
-fi
-
-# =========================
-# OpenMP pinning
-# =========================
 export OMP_NUM_THREADS="$THREADS"
 export OMP_PROC_BIND=true
 export OMP_PLACES=cores
-
-# OpenMPI: spesso serve su UniTN cluster
 export OMPI_MCA_btl=${OMPI_MCA_btl:-"^openib"}
 
-# =========================
-# mpirun command (PBS-aware)
-# =========================
-MPI_BASE=(mpirun)
-if [[ -n "${PBS_NODEFILE:-}" && -f "${PBS_NODEFILE:-}" ]]; then
-  MPI_BASE+=(--hostfile "$PBS_NODEFILE")
+if [[ ! -x "$EXE" ]]; then
+  echo "[fatal] executable not found: $EXE" >&2
+  exit 1
 fi
 
-# =========================
 # Header
-# =========================
 {
   echo "==== Strong Scaling Run ===="
   echo "date: $(date)"
@@ -66,31 +38,43 @@ fi
   echo "repeats: $REPEATS trials: $TRIALS"
   echo "P list: ${PROCS_LIST[*]}"
   echo
-  echo "P\tp90_ms\tgflops\tgbps"
+  printf "P\tp90_ms\tgflops\tgbps\n"
 } > "$OUTFILE"
 
-# =========================
-# Loop
-# =========================
 for P in "${PROCS_LIST[@]}"; do
-  echo "[run] P=$P ..." | tee -a "$OUTFILE" >/dev/null
+  echo "[run] P=$P ..." >> "$OUTFILE"
 
-  # Run (validation off per benchmark)
-  OUT="$("${MPI_BASE[@]}" -np "$P" "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate)"
+  # Per strong scaling “pulito”: fino a 72 metti tutto su 1 nodo, oltre lasciamo che usi entrambi.
+  MAP_ARGS=()
+  if [[ "$P" -le 72 ]]; then
+    MAP_ARGS=(--map-by "ppr:${P}:node:pe=1" --bind-to core)
+  else
+    MAP_ARGS=(--map-by "ppr:72:node:pe=1" --bind-to core)
+  fi
 
-  # Parse numbers from your program output
-  P90=$(echo "$OUT" | awk -F':' '/P90 execution time/ {gsub(/ ms/,"",$2); gsub(/^[ \t]+/,"",$2); print $2}')
-  GF=$(echo "$OUT"  | awk -F':' '/Throughput/        {gsub(/ GFLOPS/,"",$2); gsub(/^[ \t]+/,"",$2); print $2}')
-  GB=$(echo "$OUT"  | awk -F':' '/Estimated bandwidth/ {gsub(/ GB\/s/,"",$2); gsub(/^[ \t]+/,"",$2); print $2}')
+  # IMPORTANT: in PBS NON forzare hostfile, lascia che OpenMPI usi l’allocazione PBS.
+  set +e
+  OUT=$(mpirun -np "$P" "${MAP_ARGS[@]}" "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate 2>&1)
+  RC=$?
+  set -e
+
+  if [[ $RC -ne 0 ]]; then
+    echo "[fatal] mpirun failed at P=$P (rc=$RC). Output:" >> "$OUTFILE"
+    echo "$OUT" >> "$OUTFILE"
+    exit $RC
+  fi
+
+  P90=$(echo "$OUT" | awk -F':' '/P90 execution time/ {gsub(/ ms/,"",$2); sub(/^[ \t]+/,"",$2); print $2}')
+  GF=$(echo "$OUT"  | awk -F':' '/Throughput/        {gsub(/ GFLOPS/,"",$2); sub(/^[ \t]+/,"",$2); print $2}')
+  GB=$(echo "$OUT"  | awk -F':' '/Estimated bandwidth/ {gsub(/ GB\/s/,"",$2); sub(/^[ \t]+/,"",$2); print $2}')
 
   if [[ -z "${P90:-}" || -z "${GF:-}" || -z "${GB:-}" ]]; then
-    echo "[fatal] parsing failed for P=$P. Full output:" >> "$OUTFILE"
+    echo "[fatal] parsing failed at P=$P. Full program output:" >> "$OUTFILE"
     echo "$OUT" >> "$OUTFILE"
     exit 2
   fi
 
-  echo -e "${P}\t${P90}\t${GF}\t${GB}" >> "$OUTFILE"
+  printf "%s\t%s\t%s\t%s\n" "$P" "$P90" "$GF" "$GB" >> "$OUTFILE"
 done
 
-echo
 echo "Saved results to: $OUTFILE"
