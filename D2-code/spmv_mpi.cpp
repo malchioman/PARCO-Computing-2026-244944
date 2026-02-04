@@ -1,3 +1,4 @@
+// D2-code/spmv_mpi.cpp
 #include <mpi.h>
 #include <omp.h>
 
@@ -19,11 +20,6 @@
 #include <sstream>
 #include <limits>
 #include <numeric>
-
-#if !defined(_WIN32)
-  #include <unistd.h>   // readlink
-  #include <limits.h>   // PATH_MAX
-#endif
 
 namespace fs = std::filesystem;
 
@@ -76,17 +72,11 @@ struct GhostPlan {
     std::vector<int> rdispls;      // size P
     std::vector<int> recvcols;     // size sum(recvcounts)
 
-    // Preallocated per-iteration buffers (no alloc in timing loop)
+    // Preallocated per-iteration value buffers (no alloc in timing loop)
     std::vector<double> tmp_sendvals; // size recvcols.size()
     std::vector<double> tmp_recvvals; // size sendcols.size()
 
     bool has_ghosts() const { return !sendcols.empty() || !recvcols.empty(); }
-};
-
-// Pair used for gathering cyclic rows to rank0 during validation
-struct RowVal {
-    int32_t row;
-    double  val;
 };
 
 // ============================================================
@@ -109,7 +99,7 @@ static std::string rtrim_cr(const std::string& s) {
     return s;
 }
 
-// Find matrix path like D1 (but only rank0 does it), then broadcast to all ranks.
+// Find matrix path (rank0), then broadcast
 static std::string resolve_matrix_path_rank0(const std::string& mtxArg) {
     std::string mtx = mtxArg;
 
@@ -134,7 +124,7 @@ static std::string resolve_matrix_path_rank0(const std::string& mtxArg) {
         if (file_exists(candidate)) return candidate;
     }
 
-    return ""; // not found
+    return "";
 }
 
 static std::string bcast_string_from_rank0(std::string s, int rank) {
@@ -145,35 +135,25 @@ static std::string bcast_string_from_rank0(std::string s, int rank) {
     return s;
 }
 
-// Robust exe path (PBS-safe)
-static fs::path exe_path_robust(const char* argv0) {
-#if !defined(_WIN32)
-    // On Linux, /proc/self/exe is the most reliable
-    char buf[PATH_MAX];
-    ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf)-1);
-    if (n > 0) {
-        buf[n] = '\0';
-        return fs::path(buf);
-    }
-#endif
-    // Fallbacks
-    try {
-        return fs::canonical(fs::path(argv0));
-    } catch (...) {}
-    try {
-        return fs::absolute(fs::path(argv0));
-    } catch (...) {}
-    return fs::current_path() / fs::path(argv0);
-}
-
 static fs::path repo_root_from_exe(const char* argv0) {
-    // exe in <repo>/bin/spmv_mpi -> root = parent(bin)
+    // robust on Linux cluster: prefer /proc/self/exe
     try {
-        fs::path exe = exe_path_robust(argv0);
-        fs::path bin = exe.parent_path();
-        return bin.parent_path();
+#if defined(__linux__)
+        fs::path p = fs::read_symlink("/proc/self/exe");
+        fs::path exe = fs::canonical(p);
+        return exe.parent_path().parent_path(); // .../bin/spmv_mpi -> repo root
+#else
+        fs::path exe = fs::canonical(fs::path(argv0));
+        return exe.parent_path().parent_path();
+#endif
     } catch (...) {
-        return fs::current_path().parent_path();
+        // fallback: assume current working dir is repo root or inside it
+        try {
+            fs::path cwd = fs::current_path();
+            if (fs::exists(cwd / "bin")) return cwd;
+            if (fs::exists(cwd.parent_path() / "bin")) return cwd.parent_path();
+        } catch (...) {}
+        return fs::current_path();
     }
 }
 
@@ -241,7 +221,7 @@ static inline int num_local_rows_cyclic(int M, int rank, int P) {
 }
 
 // ============================================================
-// MPI datatype for COOEntry and RowVal
+// MPI datatype for COOEntry
 // ============================================================
 
 static MPI_Datatype make_mpi_coo_type()
@@ -259,22 +239,6 @@ static MPI_Datatype make_mpi_coo_type()
     MPI_Type_create_struct(3, bl, disp, types, &MPI_COO);
     MPI_Type_commit(&MPI_COO);
     return MPI_COO;
-}
-
-static MPI_Datatype make_mpi_rowval_type()
-{
-    MPI_Datatype MPI_RV;
-    RowVal d{};
-    int bl[2] = {1,1};
-    MPI_Aint disp[2], base;
-    MPI_Get_address(&d, &base);
-    MPI_Get_address(&d.row, &disp[0]);
-    MPI_Get_address(&d.val, &disp[1]);
-    disp[0] -= base; disp[1] -= base;
-    MPI_Datatype types[2] = {MPI_INT32_T, MPI_DOUBLE};
-    MPI_Type_create_struct(2, bl, disp, types, &MPI_RV);
-    MPI_Type_commit(&MPI_RV);
-    return MPI_RV;
 }
 
 // ============================================================
@@ -321,7 +285,7 @@ static bool parse_triplet_line(const std::string& line, int& i0, int& j0, double
 }
 
 // ============================================================
-// BONUS 4: parallel matrix reading with MPI-IO chunk parsing
+// Parallel read MatrixMarket with MPI-IO chunk parsing
 // ============================================================
 
 static void parallel_read_matrix_market_mpiio(const char* path,
@@ -503,27 +467,27 @@ static CSRLocal coo_to_csr_cyclic_rows(const std::vector<COOEntry>& coo_local,
 {
     CSRLocal A;
     A.localM = num_local_rows_cyclic(M_global, rank, P);
-    A.rowptr.assign(A.localM + 1, 0);
+    A.rowptr.assign((size_t)A.localM + 1, 0);
 
     for (const auto& e : coo_local) {
         int lr = local_row_of_global((int)e.i, rank, P);
-        if (0 <= lr && lr < A.localM) A.rowptr[lr + 1]++;
+        if (0 <= lr && lr < A.localM) A.rowptr[(size_t)lr + 1]++;
     }
 
     for (int r = 0; r < A.localM; ++r)
-        A.rowptr[r + 1] += A.rowptr[r];
+        A.rowptr[(size_t)r + 1] += A.rowptr[(size_t)r];
 
-    const int local_nnz = A.rowptr[A.localM];
-    A.col.assign(local_nnz, 0);
-    A.val.assign(local_nnz, 0.0);
+    const int local_nnz = A.rowptr[(size_t)A.localM];
+    A.col.assign((size_t)local_nnz, 0);
+    A.val.assign((size_t)local_nnz, 0.0);
 
     std::vector<int> cursor = A.rowptr;
     for (const auto& e : coo_local) {
         int lr = local_row_of_global((int)e.i, rank, P);
         if (lr < 0 || lr >= A.localM) continue;
-        int pos = cursor[lr]++;
-        A.col[pos] = (int)e.j;
-        A.val[pos] = e.v;
+        int pos = cursor[(size_t)lr]++;
+        A.col[(size_t)pos] = (int)e.j;
+        A.val[(size_t)pos] = e.v;
     }
 
     return A;
@@ -533,26 +497,26 @@ static CSRLocal coo_to_csr_cyclic_rows(const std::vector<COOEntry>& coo_local,
 static void sort_csr_rows_by_col(CSRLocal& A)
 {
     for (int r = 0; r < A.localM; ++r) {
-        int a = A.rowptr[r];
-        int b = A.rowptr[r + 1];
+        int a = A.rowptr[(size_t)r];
+        int b = A.rowptr[(size_t)r + 1];
         int len = b - a;
         if (len <= 1) continue;
 
-        std::vector<int> idx(len);
-        for (int k = 0; k < len; ++k) idx[k] = a + k;
+        std::vector<int> idx((size_t)len);
+        for (int k = 0; k < len; ++k) idx[(size_t)k] = a + k;
 
         std::sort(idx.begin(), idx.end(),
-                  [&](int p, int q){ return A.col[p] < A.col[q]; });
+                  [&](int p, int q){ return A.col[(size_t)p] < A.col[(size_t)q]; });
 
-        std::vector<int>    ctmp(len);
-        std::vector<double> vtmp(len);
+        std::vector<int>    ctmp((size_t)len);
+        std::vector<double> vtmp((size_t)len);
         for (int k = 0; k < len; ++k) {
-            ctmp[k] = A.col[idx[k]];
-            vtmp[k] = A.val[idx[k]];
+            ctmp[(size_t)k] = A.col[(size_t)idx[(size_t)k]];
+            vtmp[(size_t)k] = A.val[(size_t)idx[(size_t)k]];
         }
         for (int k = 0; k < len; ++k) {
-            A.col[a + k] = ctmp[k];
-            A.val[a + k] = vtmp[k];
+            A.col[(size_t)a + (size_t)k] = ctmp[(size_t)k];
+            A.val[(size_t)a + (size_t)k] = vtmp[(size_t)k];
         }
     }
 }
@@ -599,8 +563,8 @@ static void spmv_csr_local_omp_runtime(const CSRLocal& A,
     #pragma omp parallel for schedule(runtime)
     for (int r = 0; r < A.localM; r++) {
         double sum = 0.0;
-        for (int k = A.rowptr[r]; k < A.rowptr[r + 1]; k++) {
-            int gc  = A.col[k];
+        for (int k = A.rowptr[(size_t)r]; k < A.rowptr[(size_t)r + 1]; k++) {
+            int gc  = A.col[(size_t)k];
             int idx = g2l[(size_t)gc];
 
 #if SPMV_CHECK_G2L
@@ -610,14 +574,14 @@ static void spmv_csr_local_omp_runtime(const CSRLocal& A,
                 MPI_Abort(MPI_COMM_WORLD, 2);
             }
 #endif
-            sum += A.val[k] * x_local[(size_t)idx];
+            sum += A.val[(size_t)k] * x_local[(size_t)idx];
         }
         y_local[(size_t)r] = sum;
     }
 }
 
 // ============================================================
-// Percentile90 on rank0 (like D1)
+// Percentile90 on rank0
 // ============================================================
 
 static double percentile90_ms_from_samples(std::vector<double>& samples)
@@ -643,7 +607,6 @@ static void build_ghost_plan_and_x(int rank, int P, int N,
     plan = GhostPlan{};
     plan.P = P;
 
-    // g2l for ALL global columns
     g2l.assign((size_t)N, -1);
     x_local.clear();
     x_local.reserve((size_t)(N / std::max(1, P)) + 1024);
@@ -667,19 +630,19 @@ static void build_ghost_plan_and_x(int rank, int P, int N,
     }
 
     // Requests grouped by owner
-    plan.sendcounts.assign(P, 0);
-    for (int j : ghost_cols) plan.sendcounts[j % P]++;
+    plan.sendcounts.assign((size_t)P, 0);
+    for (int j : ghost_cols) plan.sendcounts[(size_t)(j % P)]++;
 
-    plan.sdispls.assign(P, 0);
+    plan.sdispls.assign((size_t)P, 0);
     for (int p = 1; p < P; ++p)
-        plan.sdispls[p] = plan.sdispls[p - 1] + plan.sendcounts[p - 1];
+        plan.sdispls[(size_t)p] = plan.sdispls[(size_t)p - 1] + plan.sendcounts[(size_t)p - 1];
 
     plan.sendcols.resize((size_t)ghost_cols.size());
     {
         std::vector<int> cursor = plan.sdispls;
         for (int j : ghost_cols) {
             int owner = j % P;
-            plan.sendcols[(size_t)cursor[owner]++] = j;
+            plan.sendcols[(size_t)cursor[(size_t)owner]++] = j;
         }
     }
 
@@ -689,22 +652,22 @@ static void build_ghost_plan_and_x(int rank, int P, int N,
         int j = plan.sendcols[k];
         if (g2l[(size_t)j] == -1) {
             g2l[(size_t)j] = (int)x_local.size();
-            x_local.push_back(0.0); // placeholder, will be filled by exchange
+            x_local.push_back(0.0); // placeholder filled by exchange
         }
         plan.ghost_lidx[k] = g2l[(size_t)j];
     }
 
     // Exchange counts: recvcounts[p] = how many columns rank p asks from me
-    plan.recvcounts.assign(P, 0);
+    plan.recvcounts.assign((size_t)P, 0);
     MPI_Alltoall(plan.sendcounts.data(), 1, MPI_INT,
                  plan.recvcounts.data(), 1, MPI_INT,
                  MPI_COMM_WORLD);
 
-    plan.rdispls.assign(P, 0);
+    plan.rdispls.assign((size_t)P, 0);
     int tot_recv = 0;
     for (int p = 0; p < P; ++p) {
-        plan.rdispls[p] = tot_recv;
-        tot_recv += plan.recvcounts[p];
+        plan.rdispls[(size_t)p] = tot_recv;
+        tot_recv += plan.recvcounts[(size_t)p];
     }
     plan.recvcols.resize((size_t)tot_recv);
 
@@ -713,19 +676,20 @@ static void build_ghost_plan_and_x(int rank, int P, int N,
                   plan.recvcols.data(), plan.recvcounts.data(), plan.rdispls.data(), MPI_INT,
                   MPI_COMM_WORLD);
 
-    // Preallocate per-iteration value buffers (no alloc in timing loop)
+    // Preallocate value buffers for iterative exchange (NO alloc in timing loop)
     plan.tmp_sendvals.assign(plan.recvcols.size(), 0.0);
     plan.tmp_recvvals.assign(plan.sendcols.size(), 0.0);
 }
 
-static inline void exchange_ghost_values(const GhostPlan& plan,
+// IMPORTANT: plan is NOT const (we write into tmp_* buffers)
+static inline void exchange_ghost_values(GhostPlan& plan,
                                         const std::vector<int>& g2l,
                                         const std::vector<double>& x_local,
-                                        std::vector<double>& x_local_rw)
+                                        std::vector<double>& x_work)
 {
     if (!plan.has_ghosts()) return;
 
-    // send back values for columns others requested from me
+    // prepare sendvals: values for columns others requested from me
     for (size_t i = 0; i < plan.recvcols.size(); ++i) {
         int j = plan.recvcols[i];
         int idx = g2l[(size_t)j];
@@ -743,112 +707,205 @@ static inline void exchange_ghost_values(const GhostPlan& plan,
                   plan.tmp_recvvals.data(), plan.sendcounts.data(), plan.sdispls.data(), MPI_DOUBLE,
                   MPI_COMM_WORLD);
 
-    // write ghosts into x_local at precomputed local indices
+    // write ghosts into x_work at precomputed local indices
     for (size_t k = 0; k < plan.tmp_recvvals.size(); ++k) {
         int lidx = plan.ghost_lidx[k];
-        x_local_rw[(size_t)lidx] = plan.tmp_recvvals[k];
+        x_work[(size_t)lidx] = plan.tmp_recvvals[k];
     }
 }
 
 // ============================================================
-// VALIDATION (added back): reference y computed by rank0
-// - reads matrix sequentially from file (rank0 only)
-// - uses deterministic x_value(j)
-// - gathers y from cyclic distribution using (row,val) pairs
+// Memory footprint (rough estimate of main vectors, bytes)
 // ============================================================
 
-static bool validate_on_rank0(const std::string& mtxPath,
-                              int M, int N,
-                              int rank, int P,
-                              const std::vector<double>& y_local,
-                              ValidationResult& out)
+static size_t bytes_of_vector_int(const std::vector<int>& v) {
+    return v.size() * sizeof(int);
+}
+static size_t bytes_of_vector_double(const std::vector<double>& v) {
+    return v.size() * sizeof(double);
+}
+static size_t bytes_of_vector_coo(const std::vector<COOEntry>& v) {
+    return v.size() * sizeof(COOEntry);
+}
+
+static double bytes_to_mib(size_t b) {
+    return (double)b / (1024.0 * 1024.0);
+}
+
+static double bytes_to_kib(size_t b) {
+    return (double)b / 1024.0;
+}
+
+// ============================================================
+// Validation
+//   - rank0 reads matrix sequentially, builds CSR, computes y_ref
+//   - gather y_local into y_global, compare
+//   - auto-skip on very large instances unless --validate-force
+// ============================================================
+
+struct CSRFull {
+    int M=0, N=0;
+    std::vector<int> rowptr;
+    std::vector<int> col;
+    std::vector<double> val;
+};
+
+static bool read_matrix_market_rank0_sequential(const std::string& path, CSRFull& Afull, long long& nz_header_out)
 {
-    // Gather computed y into rank0 (cyclic rows) as (globalRow, val)
-    int localM = (int)y_local.size();
-    std::vector<RowVal> send(localM);
-    for (int lr = 0; lr < localM; ++lr) {
-        int gi = rank + lr * P;
-        send[(size_t)lr] = RowVal{(int32_t)gi, y_local[(size_t)lr]};
-    }
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return false;
 
-    std::vector<int> counts(P, 0), displs(P, 0);
-    MPI_Gather(&localM, 1, MPI_INT, counts.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+    // skip comments + banner line(s)
+    char buf[4096];
+    bool got_dims = false;
+    int M=0, N=0, nz=0;
 
-    std::vector<RowVal> all;
-    int tot = 0;
-    if (rank == 0) {
-        for (int p = 0; p < P; ++p) { displs[p] = tot; tot += counts[p]; }
-        all.resize((size_t)tot);
-    }
-
-    MPI_Datatype MPI_RV = make_mpi_rowval_type();
-    MPI_Gatherv(send.data(), localM, MPI_RV,
-                (rank==0? all.data(): nullptr),
-                (rank==0? counts.data(): nullptr),
-                (rank==0? displs.data(): nullptr),
-                MPI_RV, 0, MPI_COMM_WORLD);
-    MPI_Type_free(&MPI_RV);
-
-    if (rank != 0) return true;
-
-    std::vector<double> y_gather((size_t)M, 0.0);
-    for (const auto& rv : all) {
-        if (rv.row >= 0 && rv.row < M) y_gather[(size_t)rv.row] = rv.val;
-    }
-
-    // Build reference y by reading file sequentially (rank0 only)
-    std::vector<double> y_ref((size_t)M, 0.0);
-
-    std::ifstream fin(mtxPath);
-    if (!fin) {
-        std::cerr << "[validation] cannot open matrix for validation: " << mtxPath << "\n";
-        return false;
-    }
-
-    std::string line;
-    bool dims_seen = false;
-    while (std::getline(fin, line)) {
+    while (std::fgets(buf, (int)sizeof(buf), f)) {
+        std::string line(buf);
         line = rtrim_cr(line);
         if (line.empty()) continue;
-        if (line[0] == '%') continue;
-
-        if (!dims_seen) {
-            int m2=0,n2=0,nz2=0;
-            if (!parse_dims_line(line, m2, n2, nz2)) continue;
-            dims_seen = true;
-            continue;
+        if (!line.empty() && line[0] == '%') continue;
+        if (parse_dims_line(line, M, N, nz)) {
+            got_dims = true;
+            break;
         }
+    }
+
+    if (!got_dims) { std::fclose(f); return false; }
+
+    nz_header_out = (long long)nz;
+
+    std::vector<COOEntry> coo;
+    coo.reserve((size_t)std::max(1, nz));
+
+    while (std::fgets(buf, (int)sizeof(buf), f)) {
+        std::string line(buf);
+        line = rtrim_cr(line);
+        if (line.empty()) continue;
+        if (!line.empty() && line[0] == '%') continue;
 
         int i0, j0;
         double v;
         if (!parse_triplet_line(line, i0, j0, v)) continue;
         if (i0 < 0 || i0 >= M || j0 < 0 || j0 >= N) continue;
-
-        y_ref[(size_t)i0] += v * x_value(j0);
+        coo.push_back({(int32_t)i0, (int32_t)j0, v});
     }
+    std::fclose(f);
 
-    // Compute error metrics
-    long double num = 0.0L;
-    long double den = 0.0L;
-    long double max_abs = 0.0L;
+    Afull.M = M;
+    Afull.N = N;
+    Afull.rowptr.assign((size_t)M + 1, 0);
 
-    for (int i = 0; i < M; ++i) {
-        long double diff = (long double)y_gather[(size_t)i] - (long double)y_ref[(size_t)i];
-        long double ad   = std::fabsl(diff);
-        if (ad > max_abs) max_abs = ad;
-        num += diff * diff;
-        den += (long double)y_ref[(size_t)i] * (long double)y_ref[(size_t)i];
+    for (const auto& e : coo) Afull.rowptr[(size_t)e.i + 1]++;
+
+    for (int r=0;r<M;r++) Afull.rowptr[(size_t)r+1] += Afull.rowptr[(size_t)r];
+
+    const int nnz_used = Afull.rowptr[(size_t)M];
+    Afull.col.assign((size_t)nnz_used, 0);
+    Afull.val.assign((size_t)nnz_used, 0.0);
+
+    std::vector<int> cursor = Afull.rowptr;
+    for (const auto& e : coo) {
+        int r = (int)e.i;
+        int pos = cursor[(size_t)r]++;
+        Afull.col[(size_t)pos] = (int)e.j;
+        Afull.val[(size_t)pos] = e.v;
     }
-
-    out.max_abs_error = max_abs;
-    out.rel_L2_error  = (den > 0.0L) ? std::sqrt(num / den) : std::sqrt(num);
 
     return true;
 }
 
+static void spmv_csr_full(const CSRFull& A, std::vector<double>& y)
+{
+    y.assign((size_t)A.M, 0.0);
+    for (int r=0;r<A.M;r++) {
+        double sum = 0.0;
+        for (int k=A.rowptr[(size_t)r]; k<A.rowptr[(size_t)r+1]; k++) {
+            int j = A.col[(size_t)k];
+            sum += A.val[(size_t)k] * x_value(j);
+        }
+        y[(size_t)r] = sum;
+    }
+}
+
+static bool validate_on_rank0(const std::string& mtxResolved,
+                             int M, int N, int P,
+                             const std::vector<double>& y_local,
+                             ValidationResult& out,
+                             bool force_validate,
+                             long long nnz_used_global)
+{
+    // Safety threshold (avoid exploding on huge matrices)
+    // You can tune; force with --validate-force.
+    const long long MAX_NNZ_VALIDATE = 5'000'000LL; // 5M entries
+    const long long MAX_M_VALIDATE   = 2'000'000LL; // 2M rows
+
+    if (!force_validate) {
+        if (nnz_used_global > MAX_NNZ_VALIDATE || M > MAX_M_VALIDATE) {
+            return false; // skipped
+        }
+    }
+
+    // rank0 has to rebuild y_global from y_local pieces:
+    // cyclic row distribution: rows i where i%P==rank
+    // So we need gather all y_local to rank0 with Gatherv.
+    std::vector<int> recvcounts(P,0), displs(P,0);
+    for (int r=0;r<P;r++) recvcounts[r] = num_local_rows_cyclic(M, r, P);
+    for (int r=1;r<P;r++) displs[r] = displs[r-1] + recvcounts[r-1];
+
+    std::vector<double> y_gather((size_t)M, 0.0);
+
+    MPI_Gatherv(y_local.data(), (int)y_local.size(), MPI_DOUBLE,
+                y_gather.data(), recvcounts.data(), displs.data(), MPI_DOUBLE,
+                0, MPI_COMM_WORLD);
+
+    // Convert cyclic-packed y_gather into true row order:
+    // In y_gather we placed blocks per rank in rank order (Gatherv).
+    // We must map back: for each rank r, local index lr -> global row gi = r + lr*P.
+    std::vector<double> y_global((size_t)M, 0.0);
+    for (int r=0;r<P;r++) {
+        int base = displs[r];
+        int lm = recvcounts[r];
+        for (int lr=0; lr<lm; lr++) {
+            int gi = r + lr*P;
+            if (gi < M) y_global[(size_t)gi] = y_gather[(size_t)base + (size_t)lr];
+        }
+    }
+
+    // Build reference on rank0
+    CSRFull Afull;
+    long long nz_header_ref = 0;
+    if (!read_matrix_market_rank0_sequential(mtxResolved, Afull, nz_header_ref)) {
+        std::cerr << "[validation] rank0 failed to read matrix sequentially\n";
+        return false;
+    }
+
+    std::vector<double> y_ref;
+    spmv_csr_full(Afull, y_ref);
+
+    // Compare
+    long double num = 0.0L;
+    long double den = 0.0L;
+    long double max_abs = 0.0L;
+
+    for (int i=0;i<M;i++) {
+        long double diff = (long double)y_global[(size_t)i] - (long double)y_ref[(size_t)i];
+        long double ad   = (long double)std::fabs(diff); // portable
+        if (ad > max_abs) max_abs = ad;
+
+        num += diff*diff;
+        long double rv = (long double)y_ref[(size_t)i];
+        den += rv*rv;
+    }
+
+    out.max_abs_error = max_abs;
+    out.rel_L2_error  = (den > 0.0L) ? std::sqrt(num/den) : std::sqrt(num);
+
+    return true; // performed
+}
+
 // ============================================================
-// Logging (human readable + TSV) like D1
-// Keeps "as before" + validation + robust results path.
+// Logging (always write under repo_root/results)
 // ============================================================
 
 static void append_log_rank0(const char* argv0,
@@ -865,6 +922,7 @@ static void append_log_rank0(const char* argv0,
                             int trials,
                             int sort_rows,
                             int do_validation,
+                            int validation_performed,
                             const ValidationResult& vres,
                             double p90_e2e_ms,
                             double p90_comp_ms,
@@ -878,112 +936,106 @@ static void append_log_rank0(const char* argv0,
 {
     fs::path root = repo_root_from_exe(argv0);
     fs::path results_dir = root / "results";
-    std::error_code ec;
-    fs::create_directories(results_dir, ec);
+    fs::create_directories(results_dir);
 
     // Human-readable log
-    try {
+    {
         fs::path log_path = results_dir / "spmv_mpi_results.txt";
         bool write_header = !fs::exists(log_path);
 
         std::ofstream fout(log_path, std::ios::app);
-        if (!fout) {
-            std::cerr << "[warning] Could not write results to: " << log_path << "\n";
-            return;
+        if (fout) {
+            if (write_header) {
+                fout << "SpMV MPI Benchmark - Run Log\n\n";
+            }
+
+            auto now   = std::chrono::system_clock::now();
+            std::time_t t_c = std::chrono::system_clock::to_time_t(now);
+            std::tm* tm = std::localtime(&t_c);
+
+            fout << "=================================================================\n";
+            fout << "Run at " << std::put_time(tm, "%Y-%m-%d %H:%M:%S") << "\n";
+            fout << "Matrix    : " << mtx
+                 << " (" << M << " x " << N
+                 << ", nnz(header) = " << nz_header
+                 << ", nnz(used) = "   << nz_used << ")\n";
+            fout << "Config    : ranks=" << ranks
+                 << ", threads=" << threads
+                 << ", schedule=" << lower_copy(schedule)
+                 << "(chunk=" << chunk << ")"
+                 << ", warmup=" << warmup
+                 << ", repeats=" << repeats
+                 << ", trials=" << trials
+                 << ", sort_rows=" << sort_rows
+                 << ", validation=" << do_validation
+                 << ", validation_performed=" << validation_performed << "\n";
+            fout << std::fixed << std::setprecision(3);
+            fout << "Times     : P90_e2e_ms="  << p90_e2e_ms
+                 << ", P90_comp_ms=" << p90_comp_ms
+                 << ", P90_comm_ms=" << p90_comm_ms << "\n";
+            fout << "Perf      : GFLOPS_e2e="  << gflops_e2e
+                 << ", GBps_e2e="    << gbps_e2e
+                 << ", GFLOPS_comp=" << gflops_comp
+                 << ", GBps_comp="   << gbps_comp << "\n";
+            fout << "Comm/Iter : Per-rank max (KiB): total=" << comm_kib_max << "\n";
+            fout << "Memory    : Per-rank max (MiB): total=" << mem_mib_max << "\n";
+
+            if (do_validation && validation_performed) {
+                fout.setf(std::ios::scientific, std::ios::floatfield);
+                fout << "Validation: rel_L2_error=" << (long double)vres.rel_L2_error
+                     << ", max_abs_error=" << (long double)vres.max_abs_error << "\n";
+            } else if (do_validation && !validation_performed) {
+                fout << "Validation: skipped (too large unless --validate-force)\n";
+            } else {
+                fout << "Validation: disabled (--no-validate)\n";
+            }
+
+            fout << "=================================================================\n\n";
         }
-
-        if (write_header) {
-            fout << "SpMV MPI Benchmark - Run Log\n\n";
-        }
-
-        auto now   = std::chrono::system_clock::now();
-        std::time_t t_c = std::chrono::system_clock::to_time_t(now);
-        std::tm* tm = std::localtime(&t_c);
-
-        std::ostringstream validation_line;
-        validation_line.setf(std::ios::scientific, std::ios::floatfield);
-        validation_line << "rel_L2_error=" << (long double)vres.rel_L2_error
-                        << ", max_abs_error=" << (long double)vres.max_abs_error;
-
-        fout << "=================================================================\n";
-        fout << "Run at " << std::put_time(tm, "%Y-%m-%d %H:%M:%S") << "\n";
-        fout << "Matrix    : " << mtx
-             << " (" << M << " x " << N
-             << ", nnz(header) = " << nz_header
-             << ", nnz(used) = "   << nz_used << ")\n";
-        fout << "Config    : ranks=" << ranks
-             << ", threads=" << threads
-             << ", schedule=" << lower_copy(schedule)
-             << "(chunk=" << chunk << ")"
-             << ", warmup=" << warmup
-             << ", repeats=" << repeats
-             << ", trials=" << trials
-             << ", sort_rows=" << sort_rows
-             << ", validation=" << do_validation << "\n";
-        fout << "I/O       : MPI-IO chunk parsing (redistributed by row owner)\n";
-        fout << "Comm      : ghost exchange via Alltoallv of double values (each iteration)\n";
-        fout << std::fixed << std::setprecision(3);
-        fout << "Metrics   : commKiB_max=" << comm_kib_max
-             << ", memMiB_max=" << mem_mib_max << "\n";
-
-        if (do_validation) fout << "Validation: " << validation_line.str() << "\n";
-        else              fout << "Validation: (skipped)\n";
-
-        fout << std::fixed << std::setprecision(3);
-        fout << "Results   : P90_e2e_ms=" << p90_e2e_ms
-             << ", GFLOPS_e2e=" << gflops_e2e
-             << ", GBps_e2e=" << gbps_e2e << "\n";
-        fout << "           : P90_comp_ms=" << p90_comp_ms
-             << ", GFLOPS_comp=" << gflops_comp
-             << ", GBps_comp=" << gbps_comp << "\n";
-        fout << "           : P90_comm_ms=" << p90_comm_ms << "\n";
-        fout << "=================================================================\n\n";
-    } catch (...) {
-        // ignore
     }
 
-    // TSV log
-    try {
+    // TSV
+    {
         fs::path tsv_path = results_dir / "spmv_mpi_results.tsv";
         bool write_header = !fs::exists(tsv_path);
 
         std::ofstream fout(tsv_path, std::ios::app);
-        if (!fout) return;
+        if (fout) {
+            if (write_header) {
+                fout << "timestamp\tmatrix\tM\tN\tnz_header\tnz_used\tranks\tthreads\tsched\tchunk\twarmup\trepeats\ttrials\tsort_rows\t"
+                        "p90_e2e_ms\tp90_comp_ms\tp90_comm_ms\tgflops_e2e\tgbps_e2e\tgflops_comp\tgbps_comp\tcommKiB_max\tmemMiB_max\t"
+                        "validation\tvalidation_performed\trelL2\tmaxAbs\n";
+            }
 
-        if (write_header) {
-            fout << "timestamp\tmatrix\tM\tN\tnz_header\tnz_used\tranks\tthreads\tsched\tchunk\twarmup\trepeats\ttrials\tsort_rows\t"
-                    "p90_e2e_ms\tp90_comp_ms\tp90_comm_ms\tgflops_e2e\tgbps_e2e\tgflops_comp\tgbps_comp\t"
-                    "commKiB_max\tmemMiB_max\tvalidation\trelL2\tmaxAbs\n";
+            auto now   = std::chrono::system_clock::now();
+            std::time_t t_c = std::chrono::system_clock::to_time_t(now);
+            std::tm* tm = std::localtime(&t_c);
+
+            std::ostringstream ts;
+            ts << std::put_time(tm, "%Y-%m-%d_%H:%M:%S");
+
+            fout << ts.str() << "\t"
+                 << mtx << "\t"
+                 << M << "\t" << N << "\t"
+                 << nz_header << "\t" << nz_used << "\t"
+                 << ranks << "\t" << threads << "\t"
+                 << lower_copy(schedule) << "\t" << chunk << "\t"
+                 << warmup << "\t" << repeats << "\t" << trials << "\t"
+                 << sort_rows << "\t"
+                 << std::setprecision(9) << p90_e2e_ms << "\t"
+                 << std::setprecision(9) << p90_comp_ms << "\t"
+                 << std::setprecision(9) << p90_comm_ms << "\t"
+                 << std::setprecision(9) << gflops_e2e << "\t"
+                 << std::setprecision(9) << gbps_e2e << "\t"
+                 << std::setprecision(9) << gflops_comp << "\t"
+                 << std::setprecision(9) << gbps_comp << "\t"
+                 << std::setprecision(9) << comm_kib_max << "\t"
+                 << std::setprecision(9) << mem_mib_max << "\t"
+                 << do_validation << "\t"
+                 << validation_performed << "\t"
+                 << (validation_performed ? (double)vres.rel_L2_error : 0.0) << "\t"
+                 << (validation_performed ? (double)vres.max_abs_error : 0.0) << "\n";
         }
-
-        auto now   = std::chrono::system_clock::now();
-        std::time_t t_c = std::chrono::system_clock::to_time_t(now);
-        std::tm* tm = std::localtime(&t_c);
-        std::ostringstream ts;
-        ts << std::put_time(tm, "%Y-%m-%d_%H:%M:%S");
-
-        fout << ts.str() << "\t"
-             << mtx << "\t"
-             << M << "\t" << N << "\t"
-             << nz_header << "\t" << nz_used << "\t"
-             << ranks << "\t" << threads << "\t"
-             << lower_copy(schedule) << "\t" << chunk << "\t"
-             << warmup << "\t" << repeats << "\t" << trials << "\t"
-             << sort_rows << "\t"
-             << std::setprecision(9) << p90_e2e_ms << "\t"
-             << std::setprecision(9) << p90_comp_ms << "\t"
-             << std::setprecision(9) << p90_comm_ms << "\t"
-             << std::setprecision(9) << gflops_e2e << "\t"
-             << std::setprecision(9) << gbps_e2e << "\t"
-             << std::setprecision(9) << gflops_comp << "\t"
-             << std::setprecision(9) << gbps_comp << "\t"
-             << std::setprecision(9) << comm_kib_max << "\t"
-             << std::setprecision(9) << mem_mib_max << "\t"
-             << do_validation << "\t"
-             << (do_validation ? (double)vres.rel_L2_error : 0.0) << "\t"
-             << (do_validation ? (double)vres.max_abs_error : 0.0) << "\n";
-    } catch (...) {
-        // ignore
     }
 }
 
@@ -1002,7 +1054,8 @@ int main(int argc, char** argv)
     if (argc < 3) {
         if (rank == 0) {
             std::cerr << "Usage: " << argv[0]
-                      << " <matrix.mtx> <threads> [static|dynamic|guided] [chunk] [repeats] [trials] [--no-validate] [--sort-rows]\n";
+                      << " <matrix.mtx> <threads> [static|dynamic|guided|auto] [chunk] [repeats] [trials] "
+                         "[--no-validate] [--validate-force] [--sort-rows]\n";
         }
         MPI_Finalize();
         return 1;
@@ -1018,18 +1071,22 @@ int main(int argc, char** argv)
     const int warmup  = 2;
 
     int do_validation = 1;
+    int force_validate = 0;
     int sort_rows = 0;
+
     if (rank == 0) {
         for (int a=1;a<argc;a++){
             std::string s = argv[a];
-            if (s == "--no-validate") do_validation = 0;
-            if (s == "--sort-rows")   sort_rows = 1;
+            if (s == "--no-validate")      do_validation = 0;
+            if (s == "--validate-force")   force_validate = 1;
+            if (s == "--sort-rows")        sort_rows = 1;
         }
     }
     MPI_Bcast(&do_validation, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(&force_validate, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&sort_rows, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    // Resolve matrix path on rank0 then broadcast
+    // Resolve matrix path on rank0, then broadcast
     std::string mtxResolved;
     if (rank == 0) {
         mtxResolved = resolve_matrix_path_rank0(mtxArg);
@@ -1050,48 +1107,57 @@ int main(int argc, char** argv)
     }
     mtxResolved = bcast_string_from_rank0(mtxResolved, rank);
 
-    // OpenMP config
+    // Set OpenMP config
     omp_set_dynamic(0);
     omp_set_num_threads(threads_req);
 
+    // Make chunk REAL via schedule(runtime)
     int chunk_eff = chunk_arg;
     omp_sched_t sched_eff = parse_omp_schedule(schedule_arg, chunk_eff);
     omp_set_schedule(sched_eff, chunk_eff);
 
-    // Read matrix (MPI-IO) -> COO CHUNK
+    // Read matrix (MPI-IO) -> COO chunk, then redistribute by row owner
     int M=0, N=0, nz_header=0;
     std::vector<COOEntry> coo_local;
     parallel_read_matrix_market_mpiio(mtxResolved.c_str(), rank, P, M, N, nz_header, coo_local);
 
-    // Redistribute by row owner
     redistribute_coo_by_row_owner(coo_local, rank, P);
 
     // Build CSR local
     CSRLocal A = coo_to_csr_cyclic_rows(coo_local, M, rank, P);
     if (sort_rows) sort_csr_rows_by_col(A);
 
-    // nnz_used across ranks
+    // Free COO to reduce memory footprint (important on big runs)
+    std::vector<COOEntry>().swap(coo_local);
+
+    // nnz_used = sum actual nnz across ranks
     long long local_nnz = (long long)A.val.size();
     long long nnz_used  = 0;
     MPI_Allreduce(&local_nnz, &nnz_used, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
 
-    // Build x_local + ghost plan, then do one initial exchange
-    std::vector<double> x_local;
+    // Build x_local + ghost plan, and create a working x buffer with ghosts
+    std::vector<double> x_owned_and_ghosts;
     std::vector<int> g2l;
     GhostPlan plan;
-    build_ghost_plan_and_x(rank, P, N, A.col, x_local, g2l, plan);
-    // initial exchange (fills ghosts)
-    exchange_ghost_values(plan, g2l, x_local, x_local);
+    build_ghost_plan_and_x(rank, P, N, A.col, x_owned_and_ghosts, g2l, plan);
 
-    // Warmup: do BOTH comm + compute
+    // x_work is the mutable version where we overwrite ghosts each iteration.
+    // Owned part is same; ghosts updated by exchange_ghost_values.
+    std::vector<double> x_work = x_owned_and_ghosts;
+    exchange_ghost_values(plan, g2l, x_owned_and_ghosts, x_work);
+
+    // Warmup
     std::vector<double> y_local;
     for (int w=0; w<warmup; ++w) {
-        exchange_ghost_values(plan, g2l, x_local, x_local);
-        spmv_csr_local_omp_runtime(A, x_local, g2l, y_local);
+        exchange_ghost_values(plan, g2l, x_owned_and_ghosts, x_work);
+        spmv_csr_local_omp_runtime(A, x_work, g2l, y_local);
     }
 
-    // Timing samples: comm-only, compute-only, e2e (max over ranks)
-    std::vector<double> samples_e2e_ms, samples_comp_ms, samples_comm_ms;
+    // Timing samples
+    std::vector<double> samples_e2e_ms;
+    std::vector<double> samples_comp_ms;
+    std::vector<double> samples_comm_ms;
+
     if (rank == 0) {
         size_t cap = (size_t)repeats * (size_t)trials;
         samples_e2e_ms.reserve(cap);
@@ -1104,9 +1170,9 @@ int main(int argc, char** argv)
             MPI_Barrier(MPI_COMM_WORLD);
 
             double t0 = MPI_Wtime();
-            exchange_ghost_values(plan, g2l, x_local, x_local);
+            exchange_ghost_values(plan, g2l, x_owned_and_ghosts, x_work);
             double t1 = MPI_Wtime();
-            spmv_csr_local_omp_runtime(A, x_local, g2l, y_local);
+            spmv_csr_local_omp_runtime(A, x_work, g2l, y_local);
             double t2 = MPI_Wtime();
 
             double local_comm_ms = (t1 - t0) * 1000.0;
@@ -1136,69 +1202,82 @@ int main(int argc, char** argv)
         p90_comm_ms = percentile90_ms_from_samples(samples_comm_ms);
     }
 
-    // Compute per-rank comm volume (KiB) for ghost exchange VALUES per iteration
-    double local_comm_kib = 0.0;
-    {
-        // per-iteration bytes = doubles sent + doubles received
-        // send = recvcols.size() values to others; recv = sendcols.size() values from owners
-        double bytes = 8.0 * ( (double)plan.recvcols.size() + (double)plan.sendcols.size() );
-        local_comm_kib = bytes / 1024.0;
-    }
-    double comm_kib_max = 0.0;
-    MPI_Reduce(&local_comm_kib, &comm_kib_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    // Comm volume per iter (only double exchange), per rank:
+    // sent = #ghosts requested * sizeof(double)
+    // recv = #ghosts received = sendcols.size() * sizeof(double)
+    // Actually each rank receives sendcols.size() doubles.
+    size_t local_comm_bytes_iter = (plan.sendcols.size() + plan.recvcols.size()) * sizeof(double);
 
-    // Estimate memory footprint per rank (MiB)
-    auto bytes_vec_int    = [](const std::vector<int>& v)->double    { return (double)v.size() * (double)sizeof(int); };
-    auto bytes_vec_double = [](const std::vector<double>& v)->double { return (double)v.size() * (double)sizeof(double); };
+    size_t max_comm_bytes_iter = 0;
+    size_t sum_comm_bytes_iter = 0;
+    MPI_Reduce(&local_comm_bytes_iter, &max_comm_bytes_iter, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_comm_bytes_iter, &sum_comm_bytes_iter, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    double local_mem_bytes =
-        bytes_vec_int(A.rowptr) + bytes_vec_int(A.col) + bytes_vec_double(A.val) +
-        bytes_vec_double(x_local) + bytes_vec_int(g2l) +
-        bytes_vec_double(y_local) +
-        bytes_vec_int(plan.sendcounts) + bytes_vec_int(plan.sdispls) + bytes_vec_int(plan.sendcols) + bytes_vec_int(plan.ghost_lidx) +
-        bytes_vec_int(plan.recvcounts) + bytes_vec_int(plan.rdispls) + bytes_vec_int(plan.recvcols) +
-        bytes_vec_double(plan.tmp_sendvals) + bytes_vec_double(plan.tmp_recvvals);
+    // Memory footprint estimate per rank (main vectors)
+    size_t mem_bytes =
+        bytes_of_vector_int(A.rowptr) +
+        bytes_of_vector_int(A.col) +
+        bytes_of_vector_double(A.val) +
+        bytes_of_vector_double(x_owned_and_ghosts) +
+        bytes_of_vector_double(x_work) +
+        bytes_of_vector_int(g2l) +
+        bytes_of_vector_int(plan.sendcounts) +
+        bytes_of_vector_int(plan.sdispls) +
+        bytes_of_vector_int(plan.sendcols) +
+        bytes_of_vector_int(plan.ghost_lidx) +
+        bytes_of_vector_int(plan.recvcounts) +
+        bytes_of_vector_int(plan.rdispls) +
+        bytes_of_vector_int(plan.recvcols) +
+        bytes_of_vector_double(plan.tmp_sendvals) +
+        bytes_of_vector_double(plan.tmp_recvvals) +
+        bytes_of_vector_double(y_local);
 
-    double local_mem_mib = local_mem_bytes / (1024.0 * 1024.0);
-    double mem_mib_max = 0.0;
-    MPI_Reduce(&local_mem_mib, &mem_mib_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    size_t max_mem_bytes = 0;
+    size_t sum_mem_bytes = 0;
+    MPI_Reduce(&mem_bytes, &max_mem_bytes, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&mem_bytes, &sum_mem_bytes, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
 
-    // ============================================================
-    // VALIDATION (added back)
-    // ============================================================
-    ValidationResult vres{};
-    int validation_ok = 1;
-    if (do_validation) {
-        bool okv = validate_on_rank0(mtxResolved, M, N, rank, P, y_local, vres);
-        int ok_int = okv ? 1 : 0;
-        MPI_Bcast(&ok_int, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        validation_ok = ok_int;
-    }
-
-    // ============================================================
-    // Perf numbers on rank0 (use nnz_used)
-    // ============================================================
+    double commKiB_max = 0.0, commKiB_avg = 0.0;
+    double memMiB_max = 0.0, memMiB_avg = 0.0;
     if (rank == 0) {
-        const long long nnz = nnz_used;
+        commKiB_max = bytes_to_kib(max_comm_bytes_iter);
+        commKiB_avg = bytes_to_kib(sum_comm_bytes_iter / (size_t)std::max(1, P));
+        memMiB_max = bytes_to_mib(max_mem_bytes);
+        memMiB_avg = bytes_to_mib(sum_mem_bytes / (size_t)std::max(1, P));
+    }
 
+    // Validation
+    ValidationResult vres{};
+    int validation_performed = 0;
+    if (do_validation) {
+        if (rank == 0) {
+            bool did = validate_on_rank0(mtxResolved, M, N, P, y_local, vres,
+                                         (force_validate != 0), nnz_used);
+            validation_performed = did ? 1 : 0;
+        }
+        MPI_Bcast(&validation_performed, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(&vres, sizeof(ValidationResult), MPI_BYTE, 0, MPI_COMM_WORLD);
+    }
+
+    // Perf numbers on rank0 using nnz_used
+    if (rank == 0) {
         auto gflops_from_ms = [&](double ms)->double {
             return (ms > 0.0)
-                ? (2.0 * (double)nnz) / (ms / 1000.0) / 1e9
+                ? (2.0 * (double)nnz_used) / (ms / 1000.0) / 1e9
                 : std::numeric_limits<double>::infinity();
         };
 
         auto gbps_from_ms = [&](double ms)->double {
-            double bytes = (double)nnz * (8.0 + 4.0 + 8.0) + (double)M * 8.0;
+            // Simple byte model
+            double bytes = (double)nnz_used * (8.0 + 4.0 + 8.0) + (double)M * 8.0;
             return (ms > 0.0)
                 ? bytes / (ms / 1000.0) / 1e9
                 : std::numeric_limits<double>::infinity();
         };
 
-        // END-TO-END
         double gflops_e2e = gflops_from_ms(p90_e2e_ms);
         double gbps_e2e   = gbps_from_ms(p90_e2e_ms);
 
-        // COMPUTE-ONLY
         double gflops_comp = gflops_from_ms(p90_comp_ms);
         double gbps_comp   = gbps_from_ms(p90_comp_ms);
 
@@ -1228,27 +1307,24 @@ int main(int argc, char** argv)
         std::cout << "  Repeats per trial    : " << repeats << "\n";
         std::cout << "  Number of trials     : " << trials << "\n";
         std::cout << "  Sort CSR rows        : " << (sort_rows ? "yes" : "no") << "\n";
-        std::cout << "  I/O                  : MPI-IO chunk parsing (redistributed by row owner)\n";
-        std::cout << "  Comm                 : ghost exchange (Alltoallv) each iteration\n";
+        std::cout << "  I/O                  : MPI-IO chunk parsing + redistribute by row owner\n";
+        std::cout << "  Comm                 : ghost exchange (Alltoallv of doubles) each iteration\n";
         std::cout << "  Time metric          : 90th percentile (P90) of max-rank time\n\n";
 
-        // Lines parsed by scripts (keep stable!)
-        std::cout << "Per-rank max (KiB) total=" << comm_kib_max << "\n";
-        std::cout << "Per-rank max (MiB) total=" << mem_mib_max << "\n\n";
-
         if (do_validation) {
-            if (validation_ok) {
-                std::cout << std::scientific;
+            if (validation_performed) {
+                std::cout.setf(std::ios::scientific, std::ios::floatfield);
                 std::cout << "VALIDATION\n";
-                std::cout << "  rel_L2_error         : " << (double)vres.rel_L2_error << "\n";
-                std::cout << "  max_abs_error        : " << (double)vres.max_abs_error << "\n\n";
-                std::cout << std::fixed;
+                std::cout << "  rel_L2_error         : " << (long double)vres.rel_L2_error << "\n";
+                std::cout << "  max_abs_error        : " << (long double)vres.max_abs_error << "\n\n";
+                std::cout.setf(std::ios::fixed, std::ios::floatfield);
             } else {
                 std::cout << "VALIDATION\n";
-                std::cout << "  (failed to run validation)\n\n";
+                std::cout << "  status               : skipped (too large unless --validate-force)\n\n";
             }
         } else {
-            std::cout << "[validation] skipped\n\n";
+            std::cout << "VALIDATION\n";
+            std::cout << "  status               : disabled (--no-validate)\n\n";
         }
 
         std::cout << "RESULTS (END-TO-END: COMM + COMPUTE)\n";
@@ -1264,19 +1340,26 @@ int main(int argc, char** argv)
         std::cout << "EXTRA RESULTS (COMM-ONLY)\n";
         std::cout << "  Comm-only P90 time   : " << p90_comm_ms << " ms\n\n";
 
+        // These two lines are parsed by your scripts (awk)
+        std::cout << "COMM VOLUME PER ITERATION (ghost doubles only)\n";
+        std::cout << "  Per-rank max (KiB): total=" << commKiB_max << "  avg=" << commKiB_avg << "\n";
+        std::cout << "MEMORY FOOTPRINT (rough estimate)\n";
+        std::cout << "  Per-rank max (MiB): total=" << memMiB_max << "  avg=" << memMiB_avg << "\n\n";
+
         std::cout << "=================================================================\n\n";
 
-        // Write results to repo_root/results (robust)
+        // Always append results to repo_root/results
         append_log_rank0(argv[0], mtxResolved, M, N,
                          (long long)nz_header, nnz_used,
                          P, used_threads,
                          omp_sched_name(sched_now), chunk_now,
                          warmup, repeats, trials,
-                         sort_rows, do_validation, vres,
+                         sort_rows,
+                         do_validation, validation_performed, vres,
                          p90_e2e_ms, p90_comp_ms, p90_comm_ms,
                          gflops_e2e, gbps_e2e,
                          gflops_comp, gbps_comp,
-                         comm_kib_max, mem_mib_max);
+                         commKiB_max, memMiB_max);
 
         fs::path root = repo_root_from_exe(argv[0]);
         std::cout << "[Rank0] Results appended to " << (root / "results" / "spmv_mpi_results.txt") << "\n";
