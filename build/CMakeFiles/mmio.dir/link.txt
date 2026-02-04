@@ -1,0 +1,2 @@
+/usr/bin/ar qc /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/bin/libmmio.a CMakeFiles/mmio.dir/mmio/mmio.c.o
+/usr/bin/ranlib /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/bin/libmmio.a

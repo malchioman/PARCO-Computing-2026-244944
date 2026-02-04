@@ -1,0 +1,1 @@
+/usr/bin/mpic++ -O3 -DNDEBUG "CMakeFiles/custom_matrix.dir/D1-code/custom_matrix.cpp.o" -o /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/bin/custom_matrix  /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/bin/libmmio.a 
