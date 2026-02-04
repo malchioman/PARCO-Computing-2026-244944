@@ -1,0 +1,1 @@
+/usr/bin/mpic++ -O3 -DNDEBUG "CMakeFiles/make_matrices.dir/D1-code/make_matrices.cpp.o" -o /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/bin/make_matrices 

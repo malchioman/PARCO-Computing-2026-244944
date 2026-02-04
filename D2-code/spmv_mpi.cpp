@@ -279,27 +279,6 @@ static void parallel_read_matrix_market_mpiio(const char* path,
         MPI_Status st;
         MPI_File_read_at(fh, 0, head.data(), (int)HEAD_MAX, MPI_CHAR, &st);
 
-        // Banner check (soft)
-        /*
-        {
-            size_t eol = 0;
-            while (eol < head.size() && head[eol] != '\n') eol++;
-            std::string banner(head.data(), head.data() + eol);
-            banner = rtrim_cr(banner);
-            if (banner.rfind("%%MatrixMarket", 0) != 0) {
-                std::cerr << "[warning] File does not start with %%MatrixMarket banner\n";
-            } else {
-                if (banner.find("matrix") == std::string::npos ||
-                    banner.find("coordinate") == std::string::npos) {
-                    std::cerr << "[warning] MatrixMarket banner not 'matrix coordinate ...'\n";
-                }
-                if (banner.find("real") == std::string::npos) {
-                   // std::cerr << "[warning] MatrixMarket data type not 'real' (parser expects i j val)\n";
-                }
-            }
-        }
-        */
-
         // scan lines and find dims line using real '\n' offsets
         size_t pos = 0;
         bool dims_found = false;
@@ -440,7 +419,7 @@ static CSRLocal coo_to_csr_cyclic_rows(const std::vector<COOEntry>& coo_local,
     return A;
 }
 
-// Optional (wow) sort by column within each CSR row
+// Optional sort by column within each CSR row
 static void sort_csr_rows_by_col(CSRLocal& A)
 {
     for (int r = 0; r < A.localM; ++r) {
@@ -469,7 +448,7 @@ static void sort_csr_rows_by_col(CSRLocal& A)
 }
 
 // ============================================================
-// BONUS 1+2: Build x_local (owned + ghosts) via Alltoallv request/response
+// Build x_local (owned + ghosts) via Alltoallv request/response
 // g2l: size N, g2l[col] -> index in x_local (owned or ghost)
 // ============================================================
 
@@ -563,7 +542,7 @@ static void build_x_and_exchange_ghosts_alltoallv(int rank, int P, int N,
 }
 
 // ============================================================
-// OPTION B: OpenMP schedule(runtime) + omp_set_schedule()
+// OpenMP schedule(runtime) + omp_set_schedule()
 // ============================================================
 
 static omp_sched_t parse_omp_schedule(const std::string& schedule, int& chunk_io)
@@ -591,7 +570,7 @@ static const char* omp_sched_name(omp_sched_t k)
 }
 
 // ============================================================
-// SpMV local (OpenMP) using schedule(runtime) (chunk is real!)
+// SpMV local (OpenMP) using schedule(runtime)
 // ============================================================
 
 static void spmv_csr_local_omp_runtime(const CSRLocal& A,
@@ -775,7 +754,9 @@ static ValidationResult validate_spmv_mpi(int rank, int P,
 
 static void append_log_rank0(const char* argv0,
                             const std::string& mtx,
-                            int M, int N, long long nz,
+                            int M, int N,
+                            long long nz_header,
+                            long long nz_used,
                             int ranks,
                             int threads,
                             const std::string& schedule,
@@ -787,8 +768,10 @@ static void append_log_rank0(const char* argv0,
                             int do_validation,
                             const ValidationResult& vres,
                             double p90_ms,
-                            double gflops,
-                            double gbps)
+                            double gflops_agg,
+                            double gbps_agg,
+                            double gflops_per_rank,
+                            double gbps_per_rank)
 {
     try {
         fs::path root = repo_root_from_exe(argv0);
@@ -821,7 +804,8 @@ static void append_log_rank0(const char* argv0,
         fout << "Run at " << std::put_time(tm, "%Y-%m-%d %H:%M:%S") << "\n";
         fout << "Matrix    : " << mtx
              << " (" << M << " x " << N
-             << ", nnz(header) = " << nz << ")\n";
+             << ", nnz(header) = " << nz_header
+             << ", nnz(used) = " << nz_used << ")\n";
         fout << "Config    : ranks=" << ranks
              << ", threads=" << threads
              << ", schedule=" << lower_copy(schedule)
@@ -837,8 +821,10 @@ static void append_log_rank0(const char* argv0,
 
         fout << std::fixed << std::setprecision(3);
         fout << "Results   : p90_ms=" << p90_ms
-             << ", GFLOPS=" << gflops
-             << ", GBps=" << gbps << "\n";
+             << ", GFLOPS(agg)=" << gflops_agg
+             << ", GBps(agg)=" << gbps_agg
+             << ", GFLOPS/rank=" << gflops_per_rank
+             << ", GBps/rank=" << gbps_per_rank << "\n";
         fout << "=================================================================\n\n";
     } catch (const std::exception& e) {
         std::cerr << "[warning] Exception while writing results file: " << e.what() << "\n";
@@ -860,7 +846,7 @@ static void append_log_rank0(const char* argv0,
         }
 
         if (write_header) {
-            fout << "timestamp\tmatrix\tM\tN\tnz\tranks\tthreads\tsched\tchunk\twarmup\trepeats\ttrials\tsort_rows\tp90_ms\tgflops\tgbps\tvalidation\trelL2\tmaxAbs\n";
+            fout << "timestamp\tmatrix\tM\tN\tnz_header\tnz_used\tranks\tthreads\tsched\tchunk\twarmup\trepeats\ttrials\tsort_rows\tp90_ms\tgflops_agg\tgbps_agg\tgflops_per_rank\tgbps_per_rank\tvalidation\trelL2\tmaxAbs\n";
         }
 
         auto now   = std::chrono::system_clock::now();
@@ -872,14 +858,17 @@ static void append_log_rank0(const char* argv0,
 
         fout << ts.str() << "\t"
              << mtx << "\t"
-             << M << "\t" << N << "\t" << nz << "\t"
+             << M << "\t" << N << "\t"
+             << nz_header << "\t" << nz_used << "\t"
              << ranks << "\t" << threads << "\t"
              << lower_copy(schedule) << "\t" << chunk << "\t"
              << warmup << "\t" << repeats << "\t" << trials << "\t"
              << sort_rows << "\t"
              << std::setprecision(9) << p90_ms << "\t"
-             << std::setprecision(9) << gflops << "\t"
-             << std::setprecision(9) << gbps << "\t"
+             << std::setprecision(9) << gflops_agg << "\t"
+             << std::setprecision(9) << gbps_agg << "\t"
+             << std::setprecision(9) << gflops_per_rank << "\t"
+             << std::setprecision(9) << gbps_per_rank << "\t"
              << do_validation << "\t"
              << (do_validation ? (double)vres.rel_L2_error : 0.0) << "\t"
              << (do_validation ? (double)vres.max_abs_error : 0.0) << "\n";
@@ -955,12 +944,12 @@ int main(int argc, char** argv)
     omp_set_dynamic(0);
     omp_set_num_threads(threads_req);
 
-    // OPTION B: make chunk REAL via schedule(runtime)
+    // Make chunk REAL via schedule(runtime)
     int chunk_eff = chunk_arg;
     omp_sched_t sched_eff = parse_omp_schedule(schedule_arg, chunk_eff);
     omp_set_schedule(sched_eff, chunk_eff);
 
-    // Read matrix (BONUS 4 MPI-IO) -> COO local
+    // Read matrix -> COO local
     int M=0, N=0, nz_header=0;
     std::vector<COOEntry> coo_local;
     parallel_read_matrix_market_mpiio(mtxResolved.c_str(), rank, P, M, N, nz_header, coo_local);
@@ -969,7 +958,26 @@ int main(int argc, char** argv)
     CSRLocal A = coo_to_csr_cyclic_rows(coo_local, M, rank, P);
     if (sort_rows) sort_csr_rows_by_col(A);
 
-    // Build x_local + ghosts (BONUS 1+2)
+    // ------------------------------------------------------------
+    // FIX #1: compute nnz used (sum of local CSR nnz across ranks)
+    // ------------------------------------------------------------
+    long long local_nnz = (long long)A.val.size();
+    long long nnz_used  = 0;
+    long long nnz_min   = 0;
+    long long nnz_max   = 0;
+
+    MPI_Allreduce(&local_nnz, &nnz_used, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_nnz, &nnz_min,  1, MPI_LONG_LONG, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(&local_nnz, &nnz_max,  1, MPI_LONG_LONG, MPI_MAX, MPI_COMM_WORLD);
+
+    if (rank == 0) {
+        std::cerr << "[check] nz_header=" << (long long)nz_header
+                  << " nnz_used=" << nnz_used
+                  << " nnz_min=" << nnz_min
+                  << " nnz_max=" << nnz_max << "\n";
+    }
+
+    // Build x_local + ghosts
     std::vector<double> x_local;
     std::vector<int> g2l;
     build_x_and_exchange_ghosts_alltoallv(rank, P, N, A.col, x_local, g2l);
@@ -980,7 +988,7 @@ int main(int argc, char** argv)
         spmv_csr_local_omp_runtime(A, x_local, g2l, y_local);
     }
 
-    // Timing samples (P90 like D1), measure MAX over ranks each sample
+    // Timing samples (P90), measure MAX over ranks each sample
     std::vector<double> samples_ms;
     if (rank == 0) samples_ms.reserve((size_t)repeats * (size_t)trials);
 
@@ -1004,30 +1012,36 @@ int main(int argc, char** argv)
         p90_ms = percentile90_ms_from_samples(samples_ms);
     }
 
-    // Validation (optional, collectives safe: all or none)
+    // Validation (optional)
     ValidationResult vres{};
     if (do_validation) {
         vres = validate_spmv_mpi(rank, P, M, N, coo_local, y_local);
     }
 
-    // Compute perf numbers on rank0 using nz from header (consistent)
+    // Compute perf numbers on rank0 using nnz_used (FIX #1)
     if (rank == 0) {
-        const long long nnz = (long long)nz_header;
+        const long long nnz = nnz_used;
 
-        double gflops = (p90_ms > 0.0)
+        double gflops_agg = (p90_ms > 0.0)
             ? (2.0 * (double)nnz) / (p90_ms / 1000.0) / 1e9
             : std::numeric_limits<double>::infinity();
 
-        // Simple byte model (similar spirit to D1)
+        // Simple byte model
         double bytes = (double)nnz * (8.0 + 4.0 + 8.0) + (double)M * 8.0;
-        double gbps = (p90_ms > 0.0)
+        double gbps_agg = (p90_ms > 0.0)
             ? bytes / (p90_ms / 1000.0) / 1e9
             : std::numeric_limits<double>::infinity();
+
+        // ------------------------------------------------------------
+        // FIX #2: per-rank metrics (derived from aggregate)
+        // ------------------------------------------------------------
+        double gflops_per_rank = gflops_agg / (double)P;
+        double gbps_per_rank   = gbps_agg   / (double)P;
 
         // Real used threads
         int used_threads = omp_used_threads();
 
-        // Read back the effective OpenMP schedule (truth source)
+        // Read back effective OpenMP schedule
         omp_sched_t sched_now;
         int chunk_now;
         omp_get_schedule(&sched_now, &chunk_now);
@@ -1042,7 +1056,8 @@ int main(int argc, char** argv)
         std::cout << "MATRIX INFO\n";
         std::cout << "  File                 : " << mtxResolved << "\n";
         std::cout << "  Dimensions           : " << M << " x " << N << "\n";
-        std::cout << "  Non-zero entries     : " << nnz << "\n\n";
+        std::cout << "  Non-zero entries (header) : " << (long long)nz_header << "\n";
+        std::cout << "  Non-zero entries (used)   : " << nnz_used << "\n\n";
 
         std::cout << "BENCHMARK SETTINGS\n";
         std::cout << "  MPI ranks            : " << P << "\n";
@@ -1053,10 +1068,10 @@ int main(int argc, char** argv)
         std::cout << "  Repeats per trial    : " << repeats << "\n";
         std::cout << "  Number of trials     : " << trials << "\n";
         std::cout << "  Sort CSR rows        : " << (sort_rows ? "yes" : "no") << "\n";
-        std::cout << "  I/O                  : MPI-IO chunk parsing (Bonus 4)\n";
+        std::cout << "  I/O                  : MPI-IO chunk parsing\n";
         std::cout << "  Time metric          : 90th percentile (P90) of max-rank time\n\n";
 
-        // Validation on stderr (scientific) like D1
+        // Validation on stderr (scientific)
         if (do_validation) {
             auto old_prec  = std::cerr.precision();
             auto old_flags = std::cerr.flags();
@@ -1073,15 +1088,21 @@ int main(int argc, char** argv)
 
         std::cout << "\nRESULTS\n";
         std::cout << "  P90 execution time   : " << p90_ms << " ms\n";
-        std::cout << "  Throughput           : " << gflops << " GFLOPS\n";
-        std::cout << "  Estimated bandwidth  : " << gbps << " GB/s\n\n";
+        std::cout << "  Throughput (agg)     : " << gflops_agg << " GFLOPS\n";
+        std::cout << "  Bandwidth  (agg)     : " << gbps_agg << " GB/s\n";
+        std::cout << "  Throughput (per-rank): " << gflops_per_rank << " GFLOPS\n";
+        std::cout << "  Bandwidth  (per-rank): " << gbps_per_rank << " GB/s\n\n";
         std::cout << "=================================================================\n\n";
 
-        // Write results like D1 (block log + TSV)
-        append_log_rank0(argv[0], mtxResolved, M, N, nnz, P, used_threads,
+        // Write results (txt + TSV)
+        append_log_rank0(argv[0], mtxResolved, M, N,
+                         (long long)nz_header, nnz_used,
+                         P, used_threads,
                          omp_sched_name(sched_now), chunk_now, warmup, repeats, trials,
                          sort_rows, do_validation, vres,
-                         p90_ms, gflops, gbps);
+                         p90_ms,
+                         gflops_agg, gbps_agg,
+                         gflops_per_rank, gbps_per_rank);
 
         fs::path root = repo_root_from_exe(argv[0]);
         std::cout << "[Rank0] Results appended to " << (root / "results" / "spmv_mpi_results.txt") << "\n";
