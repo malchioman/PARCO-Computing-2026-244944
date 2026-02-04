@@ -6,6 +6,10 @@
 #PBS -j oe
 #PBS -o logs/strong.out
 
+export OMPI_MCA_oob=tcp
+export OMPI_MCA_btl=self,tcp
+export OMPI_MCA_mpi_cuda_support=0
+
 cd "$PBS_O_WORKDIR"
 set -euo pipefail
 
