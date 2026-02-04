@@ -1,106 +1,28 @@
 #!/bin/bash
+#PBS -q short_cpuQ
+#PBS -N weak
+#PBS -l select=2:ncpus=72:mpiprocs=72
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -o logs/weak.out
+
+export OMPI_MCA_oob=tcp
+export OMPI_MCA_btl=self,tcp
+export OMPI_MCA_mpi_cuda_support=0
+
+cd "$PBS_O_WORKDIR"
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-EXE="$REPO_ROOT/bin/spmv_mpi"
-GEN="$REPO_ROOT/bin/custom_matrix"
-OUTDIR="$REPO_ROOT/results"
-OUT="$OUTDIR/weak.txt"
+module purge
+module load gcc91
+module load openmpi-3.0.0--gcc-9.1.0
+module load cmake-3.15.4
 
-mkdir -p "$OUTDIR"
-export MATRICES_DIR="$REPO_ROOT/bin/matrices"
+mkdir -p logs results
+chmod +x script/weak.sh
 
-# ---------------- CONFIG ----------------
-THREADS="${1:-1}"
-SCHED="${2:-static}"
-CHUNK="${3:-64}"
-REPEATS="${4:-10}"
-TRIALS="${5:-5}"
+# Parametri weak (puoi cambiarli qui)
+export ROWS_PER_RANK=16384
+export NNZ_PER_RANK=1000000
 
-ROWS_PER_RANK="${6:-16384}"
-NNZ_PER_RANK="${7:-1000000}"
-
-P_LIST=(1 2 4 8 16 32 64 128)
-# ---------------------------------------
-
-{
-  echo "==== Weak Scaling Run ===="
-  echo "date: $(date)"
-  echo "host: $(hostname)"
-  echo "exe:  $EXE"
-  echo "gen:  $GEN"
-  echo "threads: $THREADS"
-  echo "schedule: $SCHED chunk=$CHUNK"
-  echo "repeats: $REPEATS trials: $TRIALS"
-  echo "rows_per_rank: $ROWS_PER_RANK"
-  echo "nnz_per_rank:  $NNZ_PER_RANK"
-  echo "P list: ${P_LIST[*]}"
-  echo
-  printf "%-6s %-8s %-8s %-10s %-12s %-14s %-12s %-12s %-12s %-12s %-14s %-14s\n" \
-    "P" "rows" "cols" "nnz" \
-    "p90_e2e_ms" "p90_comp_ms" "p90_comm_ms" \
-    "gflops_e2e" "gbps_e2e" "gflops_comp" "gbps_comp" \
-    "commKiB_max" "memMiB_max"
-} > "$OUT"
-
-for P in "${P_LIST[@]}"; do
-  rows=$((ROWS_PER_RANK * P))
-  cols=$rows
-  nnz=$((NNZ_PER_RANK * P))
-
-  mtx="weak_P${P}_rpr${ROWS_PER_RANK}_nnzpr${NNZ_PER_RANK}.mtx"
-  mtx_path="$REPO_ROOT/bin/matrices/$mtx"
-
-  echo "[gen] P=$P -> $mtx (rows=$rows cols=$cols nnz=$nnz)" >&2
-
-  # Genera dentro bin/matrices (il tuo custom_matrix deve supportare: rows cols nnz filename)
-  # Se il tuo custom_matrix accetta solo nome file e usa default, dimmelo e te lo adatto.
-  ( cd "$REPO_ROOT" && "$GEN" "$rows" "$cols" "$nnz" "$mtx" >/dev/null )
-
-  if [[ ! -f "$mtx_path" ]]; then
-    echo "[fatal] generator did not create: $mtx_path" >&2
-    exit 1
-  fi
-
-  echo "[run] P=$P ..." >&2
-  OUTRUN=$(
-    cd "$REPO_ROOT"
-    mpirun -np "$P" --bind-to none "$EXE" "$mtx" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS"
-  )
-
-  p90_e2e=$(echo "$OUTRUN" | awk -F': ' '/P90 execution time/{print $2}' | awk '{print $1}' | tail -n1)
-  p90_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only P90 time/{print $2}' | awk '{print $1}' | tail -n1)
-  p90_comm=$(echo "$OUTRUN" | awk -F': ' '/Comm-only P90 time/{print $2}' | awk '{print $1}' | tail -n1)
-
-  gflops_e2e=$(echo "$OUTRUN" | awk -F': ' '/Throughput/{print $2}' | awk '{print $1}' | tail -n1)
-  gbps_e2e=$(echo "$OUTRUN" | awk -F': ' '/Estimated bandwidth/{print $2}' | awk '{print $1}' | tail -n1)
-
-  gflops_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only GFLOPS/{print $2}' | awk '{print $1}' | tail -n1)
-  gbps_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only BW/{print $2}' | awk '{print $1}' | tail -n1)
-
-  commKiB_max=$(
-    echo "$OUTRUN" | awk '
-      /Per-rank max \(KiB\)/{
-        for(i=1;i<=NF;i++){
-          if($i ~ /^total=/){gsub("total=","",$i); print $i}
-        }
-      }' | tail -n1
-  )
-
-  memMiB_max=$(
-    echo "$OUTRUN" | awk '
-      /Per-rank max \(MiB\)/{
-        for(i=1;i<=NF;i++){
-          if($i ~ /^total=/){gsub("total=","",$i); print $i}
-        }
-      }' | tail -n1
-  )
-
-  printf "%-6d %-8d %-8d %-10d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-12.3f %-12.3f %-14.3f %-14.3f\n" \
-    "$P" "$rows" "$cols" "$nnz" \
-    "$p90_e2e" "$p90_comp" "$p90_comm" \
-    "$gflops_e2e" "$gbps_e2e" "$gflops_comp" "$gbps_comp" \
-    "${commKiB_max:-0}" "${memMiB_max:-0}" >> "$OUT"
-done
-
-echo "[done] wrote $OUT" >&2
+./script/weak.sh

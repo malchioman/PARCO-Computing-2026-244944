@@ -45,7 +45,7 @@ for P in "${P_LIST[@]}"; do
   # Esegui da repo root (così path relativi stabili)
   OUTRUN=$(
     cd "$REPO_ROOT"
-    mpirun -np "$P" --bind-to none "$EXE" "$MATRIX_NAME" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS"
+    mpirun -np "$P" --bind-to none "$EXE" "$MATRIX_NAME" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate
   )
 
   # ---- parse tempi / perf ----

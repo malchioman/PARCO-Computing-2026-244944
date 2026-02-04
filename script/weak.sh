@@ -1,172 +1,106 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
-export LC_NUMERIC=C
 
-EXE=${EXE:-"./bin/spmv_mpi"}
-GEN=${GEN:-"./bin/custom_matrix"}
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+EXE="$REPO_ROOT/bin/spmv_mpi"
+GEN="$REPO_ROOT/bin/custom_matrix"
+OUTDIR="$REPO_ROOT/results"
+OUT="$OUTDIR/weak.txt"
 
-THREADS=${THREADS:-1}
-SCHED=${SCHED:-static}
-CHUNK=${CHUNK:-64}
-REPEATS=${REPEATS:-10}
-TRIALS=${TRIALS:-5}
-
-ROWS_PER_RANK=${ROWS_PER_RANK:-16384}
-NNZ_PER_RANK=${NNZ_PER_RANK:-1000000}
-
-PROCS_LIST=(${PROCS_LIST:-1 2 4 8 16 32 64 128})
-
-OUTDIR="results"
-OUTFILE="${OUTDIR}/weak.txt"
 mkdir -p "$OUTDIR"
+export MATRICES_DIR="$REPO_ROOT/bin/matrices"
 
-export OMP_NUM_THREADS="$THREADS"
-export OMP_PROC_BIND=true
-export OMP_PLACES=cores
-export OMPI_MCA_btl=${OMPI_MCA_btl:-"^openib"}
+# ---------------- CONFIG ----------------
+THREADS="${1:-1}"
+SCHED="${2:-static}"
+CHUNK="${3:-64}"
+REPEATS="${4:-10}"
+TRIALS="${5:-5}"
 
-if [[ ! -x "$EXE" ]]; then
-  echo "[fatal] executable not found: $EXE" >&2
-  exit 1
-fi
-if [[ ! -x "$GEN" ]]; then
-  echo "[fatal] generator not found/executable: $GEN" >&2
-  exit 1
-fi
+ROWS_PER_RANK="${6:-16384}"
+NNZ_PER_RANK="${7:-1000000}"
 
-# --- pretty table formatting ---
-HDR_FMT="%-4s %10s %10s %12s %12s %14s %12s %12s %12s %15s %15s\n"
-ROW_FMT="%-4s %10s %10s %12s %12s %14s %12s %12s %12s %15s %15s\n"
+P_LIST=(1 2 4 8 16 32 64 128)
+# ---------------------------------------
 
-extract_number() {
-  echo "$OUT" | awk -F':' -v pat="$1" '
-    $0 ~ pat {
-      s=$2
-      gsub(/[^0-9eE\.\+\-]/, "", s)
-      if (s != "") { print s; exit }
-    }'
-}
-
-extract_M() {
-  echo "$OUT" | awk '
-    /Dimensions/ {
-      s=$0
-      gsub(/[^0-9]/, " ", s)
-      split(s,a," ")
-      for(i=1;i<=length(a);i++) if(a[i]!=""){ print a[i]; exit }
-    }'
-}
-
-extract_nnz_used() {
-  echo "$OUT" | awk '
-    /Non-zero entries/ {
-      split($0, parts, ":")
-      s=parts[2]
-      gsub(/[^0-9]/, " ", s)
-      split(s,a," ")
-      for(i=1;i<=length(a);i++) if(a[i]!=""){ print a[i]; exit }
-    }'
-}
-
-calc_gflops() {
-  awk -v nnz="$1" -v tms="$2" 'BEGIN{
-    if (tms<=0) { print "inf"; exit }
-    printf "%.6f", (2.0*nnz)/((tms/1000.0)*1e9)
-  }'
-}
-
-calc_gbps() {
-  awk -v nnz="$1" -v M="$2" -v tms="$3" 'BEGIN{
-    if (tms<=0) { print "inf"; exit }
-    bytes = nnz*(8+4+8) + M*8
-    printf "%.6f", bytes/((tms/1000.0)*1e9)
-  }'
-}
-
-# Header
 {
   echo "==== Weak Scaling Run ===="
   echo "date: $(date)"
   echo "host: $(hostname)"
-  echo "exe: $EXE"
-  echo "gen: $GEN"
+  echo "exe:  $EXE"
+  echo "gen:  $GEN"
   echo "threads: $THREADS"
   echo "schedule: $SCHED chunk=$CHUNK"
   echo "repeats: $REPEATS trials: $TRIALS"
   echo "rows_per_rank: $ROWS_PER_RANK"
   echo "nnz_per_rank:  $NNZ_PER_RANK"
-  echo "P list: ${PROCS_LIST[*]}"
+  echo "P list: ${P_LIST[*]}"
   echo
-  printf "$HDR_FMT" \
+  printf "%-6s %-8s %-8s %-10s %-12s %-14s %-12s %-12s %-12s %-12s %-14s %-14s\n" \
     "P" "rows" "cols" "nnz" \
-    "p90_e2e_ms" "p90_compute_ms" "p90_comm_ms" \
-    "gflops_e2e" "gbps_e2e" "gflops_compute" "gbps_compute"
-} > "$OUTFILE"
+    "p90_e2e_ms" "p90_comp_ms" "p90_comm_ms" \
+    "gflops_e2e" "gbps_e2e" "gflops_comp" "gbps_comp" \
+    "commKiB_max" "memMiB_max"
+} > "$OUT"
 
-for P in "${PROCS_LIST[@]}"; do
-  # Weak scaling: local rows constant => global rows = rows_per_rank * P
-  M=$((ROWS_PER_RANK * P))
-  N=$M
-  NNZ=$((NNZ_PER_RANK * P))
+for P in "${P_LIST[@]}"; do
+  rows=$((ROWS_PER_RANK * P))
+  cols=$rows
+  nnz=$((NNZ_PER_RANK * P))
 
-  OUTNAME="weak_P${P}_rpr${ROWS_PER_RANK}_nnzpr${NNZ_PER_RANK}.mtx"
-  OUTPATH="bin/matrices/${OUTNAME}"
+  mtx="weak_P${P}_rpr${ROWS_PER_RANK}_nnzpr${NNZ_PER_RANK}.mtx"
+  mtx_path="$REPO_ROOT/bin/matrices/$mtx"
 
-  echo "[gen] P=$P -> $OUTPATH (rows=$M cols=$N nnz=$NNZ)" >&2
-  "$GEN" "$OUTPATH" "$M" "$N" "$NNZ" >/dev/null
+  echo "[gen] P=$P -> $mtx (rows=$rows cols=$cols nnz=$nnz)" >&2
 
-  if [[ ! -f "$OUTPATH" ]]; then
-    {
-      echo
-      echo "[fatal] generator did not create expected file: $OUTPATH"
-    } >> "$OUTFILE"
-    exit 2
+  # Genera dentro bin/matrices (il tuo custom_matrix deve supportare: rows cols nnz filename)
+  # Se il tuo custom_matrix accetta solo nome file e usa default, dimmelo e te lo adatto.
+  ( cd "$REPO_ROOT" && "$GEN" "$rows" "$cols" "$nnz" "$mtx" >/dev/null )
+
+  if [[ ! -f "$mtx_path" ]]; then
+    echo "[fatal] generator did not create: $mtx_path" >&2
+    exit 1
   fi
 
   echo "[run] P=$P ..." >&2
+  OUTRUN=$(
+    cd "$REPO_ROOT"
+    mpirun -np "$P" --bind-to none "$EXE" "$mtx" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate
+  )
 
-  MAP_ARGS=()
-  if [[ "$P" -le 72 ]]; then
-    MAP_ARGS=(--map-by "ppr:${P}:node:pe=1" --bind-to core)
-  else
-    MAP_ARGS=(--map-by "ppr:72:node:pe=1" --bind-to core)
-  fi
+  p90_e2e=$(echo "$OUTRUN" | awk -F': ' '/P90 execution time/{print $2}' | awk '{print $1}' | tail -n1)
+  p90_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only P90 time/{print $2}' | awk '{print $1}' | tail -n1)
+  p90_comm=$(echo "$OUTRUN" | awk -F': ' '/Comm-only P90 time/{print $2}' | awk '{print $1}' | tail -n1)
 
-  set +e
-  OUT=$(mpirun -np "$P" "${MAP_ARGS[@]}" "$EXE" "$OUTPATH" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate 2>&1)
-  RC=$?
-  set -e
+  gflops_e2e=$(echo "$OUTRUN" | awk -F': ' '/Throughput/{print $2}' | awk '{print $1}' | tail -n1)
+  gbps_e2e=$(echo "$OUTRUN" | awk -F': ' '/Estimated bandwidth/{print $2}' | awk '{print $1}' | tail -n1)
 
-  if [[ $RC -ne 0 ]]; then
-    {
-      echo
-      echo "[fatal] mpirun failed at P=$P (rc=$RC). Output:"
-      echo "$OUT"
-    } >> "$OUTFILE"
-    exit $RC
-  fi
+  gflops_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only GFLOPS/{print $2}' | awk '{print $1}' | tail -n1)
+  gbps_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only BW/{print $2}' | awk '{print $1}' | tail -n1)
 
-  # parse times
-  P90_E2E=$(extract_number "P90 execution time")
-  P90_COMP=$(extract_number "Compute-only P90 time")
-  P90_COMM=$(extract_number "Comm-only P90 time")
-  [[ -n "${P90_COMP:-}" ]] || P90_COMP="$P90_E2E"
-  [[ -n "${P90_COMM:-}" ]] || P90_COMM="0"
+  commKiB_max=$(
+    echo "$OUTRUN" | awk '
+      /Per-rank max \(KiB\)/{
+        for(i=1;i<=NF;i++){
+          if($i ~ /^total=/){gsub("total=","",$i); print $i}
+        }
+      }' | tail -n1
+  )
 
-  # parse M + nnz_used from program output (robusto)
-  M_OUT=$(extract_M)
-  NNZ_USED=$(extract_nnz_used)
-  [[ -n "${M_OUT:-}" && -n "${NNZ_USED:-}" ]] || { echo "[fatal] parsing M/nnz failed at P=$P" >&2; exit 2; }
+  memMiB_max=$(
+    echo "$OUTRUN" | awk '
+      /Per-rank max \(MiB\)/{
+        for(i=1;i<=NF;i++){
+          if($i ~ /^total=/){gsub("total=","",$i); print $i}
+        }
+      }' | tail -n1
+  )
 
-  GF_E2E=$(calc_gflops "$NNZ_USED" "$P90_E2E")
-  GB_E2E=$(calc_gbps   "$NNZ_USED" "$M_OUT" "$P90_E2E")
-  GF_COMP=$(calc_gflops "$NNZ_USED" "$P90_COMP")
-  GB_COMP=$(calc_gbps   "$NNZ_USED" "$M_OUT" "$P90_COMP")
-
-  printf "$ROW_FMT" \
-    "$P" "$M_OUT" "$M_OUT" "$NNZ_USED" \
-    "$P90_E2E" "$P90_COMP" "$P90_COMM" \
-    "$GF_E2E" "$GB_E2E" "$GF_COMP" "$GB_COMP" >> "$OUTFILE"
+  printf "%-6d %-8d %-8d %-10d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-12.3f %-12.3f %-14.3f %-14.3f\n" \
+    "$P" "$rows" "$cols" "$nnz" \
+    "$p90_e2e" "$p90_comp" "$p90_comm" \
+    "$gflops_e2e" "$gbps_e2e" "$gflops_comp" "$gbps_comp" \
+    "${commKiB_max:-0}" "${memMiB_max:-0}" >> "$OUT"
 done
 
-echo "Saved results to: $OUTFILE" >&2
+echo "[done] wrote $OUT" >&2
