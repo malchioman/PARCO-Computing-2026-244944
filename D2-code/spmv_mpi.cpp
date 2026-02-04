@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <sstream>
 #include <limits>
+#include <numeric>
 
 namespace fs = std::filesystem;
 
@@ -66,9 +67,13 @@ struct GhostPlan {
     std::vector<int> ghost_lidx;   // same size as sendcols: where to write received values in x_local
 
     // Requests received from others (columns others need from me)
-    std::vector<int> recvcounts;   // size P (how many each rank asks from me)
+    std::vector<int> recvcounts;   // size P
     std::vector<int> rdispls;      // size P
     std::vector<int> recvcols;     // size sum(recvcounts)
+
+    // Preallocated per-iteration value buffers (no alloc in timing loop)
+    std::vector<double> tmp_sendvals; // size recvcols.size()
+    std::vector<double> tmp_recvvals; // size sendcols.size()
 
     bool has_ghosts() const { return !sendcols.empty() || !recvcols.empty(); }
 };
@@ -165,7 +170,6 @@ static inline uint64_t splitmix64(uint64_t x) {
 }
 
 static inline double u01_from_u64(uint64_t x) {
-    // 53-bit mantissa uniform in (0,1)
     const double inv = 1.0 / 9007199254740992.0; // 2^53
     double u = ((x >> 11) & 0x1fffffffffffffULL) * inv;
     if (u <= 0.0) u = inv;
@@ -174,7 +178,6 @@ static inline double u01_from_u64(uint64_t x) {
 }
 
 static inline double x_value(int j) {
-    // Box-Muller using deterministic hashed uniforms
     const uint64_t seed = 42ULL;
     uint64_t a = splitmix64(seed ^ (uint64_t)j);
     uint64_t b = splitmix64(a + 0x12345678ULL);
@@ -197,7 +200,6 @@ static inline double x_value(int j) {
 static inline int owner_row(int i, int P) { return i % P; }
 
 static inline int local_row_of_global(int gi, int rank, int P) {
-    // valid only if gi%P==rank
     return (gi - rank) / P;
 }
 
@@ -272,8 +274,6 @@ static bool parse_triplet_line(const std::string& line, int& i0, int& j0, double
 
 // ============================================================
 // BONUS 4: parallel matrix reading with MPI-IO chunk parsing
-// IMPORTANT FIX: each rank keeps ALL triplets parsed in its file chunk.
-//               redistribution by owner happens afterwards.
 // ============================================================
 
 static void parallel_read_matrix_market_mpiio(const char* path,
@@ -301,7 +301,6 @@ static void parallel_read_matrix_market_mpiio(const char* path,
         MPI_Status st;
         MPI_File_read_at(fh, 0, head.data(), (int)HEAD_MAX, MPI_CHAR, &st);
 
-        // scan lines and find dims line using real '\n' offsets
         size_t pos = 0;
         bool dims_found = false;
 
@@ -347,7 +346,6 @@ static void parallel_read_matrix_market_mpiio(const char* path,
     MPI_Offset my_start = data_start + (MPI_Offset)rank * chunk;
     MPI_Offset my_end   = std::min<MPI_Offset>(data_start + (MPI_Offset)(rank + 1) * chunk, fsize);
 
-    // overlap to handle boundary lines
     const MPI_Offset OVER = 4096;
     MPI_Offset read_start = (rank == 0) ? my_start : std::max<MPI_Offset>(data_start, my_start - OVER);
     MPI_Offset read_end   = (rank == P - 1) ? my_end   : std::min<MPI_Offset>(fsize, my_end + OVER);
@@ -361,7 +359,6 @@ static void parallel_read_matrix_market_mpiio(const char* path,
 
     std::string s(raw.data(), raw.size());
 
-    // Convert absolute [my_start, my_end) to indices relative to read_start
     MPI_Offset rel_my_start = my_start - read_start;
     MPI_Offset rel_my_end   = my_end   - read_start;
 
@@ -370,7 +367,6 @@ static void parallel_read_matrix_market_mpiio(const char* path,
     if (a > s.size()) a = s.size();
     if (b > s.size()) b = s.size();
 
-    // Align start/end to line boundaries
     if (rank != 0) {
         while (a < s.size() && s[a] != '\n') a++;
         if (a < s.size()) a++;
@@ -398,14 +394,12 @@ static void parallel_read_matrix_market_mpiio(const char* path,
         if (!parse_triplet_line(line, i0, j0, v)) continue;
         if (i0 < 0 || i0 >= M || j0 < 0 || j0 >= N) continue;
 
-        // IMPORTANT FIX: keep ALL triplets from my file chunk.
         coo_chunk.push_back({(int32_t)i0, (int32_t)j0, v});
     }
 }
 
 // ============================================================
-// FIX: redistribute COO triplets by owner of the ROW (cyclic i%P)
-// so each rank ends up with a correct local COO
+// Redistribute COO triplets by owner row (cyclic i%P)
 // ============================================================
 
 static void redistribute_coo_by_row_owner(std::vector<COOEntry>& coo_chunk,
@@ -559,7 +553,7 @@ static void spmv_csr_local_omp_runtime(const CSRLocal& A,
         double sum = 0.0;
         for (int k = A.rowptr[r]; k < A.rowptr[r + 1]; k++) {
             int gc  = A.col[k];
-            int idx = g2l[gc];
+            int idx = g2l[(size_t)gc];
 
 #if SPMV_CHECK_G2L
             if (idx < 0 || idx >= (int)x_local.size()) {
@@ -601,7 +595,6 @@ static void build_ghost_plan_and_x(int rank, int P, int N,
     plan = GhostPlan{};
     plan.P = P;
 
-    // g2l for all global columns (fits your typical N; keep as in your code)
     g2l.assign((size_t)N, -1);
     x_local.clear();
     x_local.reserve((size_t)(N / std::max(1, P)) + 1024);
@@ -670,16 +663,19 @@ static void build_ghost_plan_and_x(int rank, int P, int N,
     MPI_Alltoallv(plan.sendcols.data(), plan.sendcounts.data(), plan.sdispls.data(), MPI_INT,
                   plan.recvcols.data(), plan.recvcounts.data(), plan.rdispls.data(), MPI_INT,
                   MPI_COMM_WORLD);
+
+    // Preallocate per-iteration value buffers (IMPORTANT for clean timing)
+    plan.tmp_sendvals.assign(plan.recvcols.size(), 0.0);
+    plan.tmp_recvvals.assign(plan.sendcols.size(), 0.0);
 }
 
-static inline void exchange_ghost_values(const GhostPlan& plan,
+static inline void exchange_ghost_values(GhostPlan& plan,
                                         const std::vector<int>& g2l,
                                         std::vector<double>& x_local)
 {
     if (!plan.has_ghosts()) return;
 
-    // send back values for columns others requested from me
-    std::vector<double> sendvals(plan.recvcols.size());
+    // Fill sendvals: values for columns others requested from me
     for (size_t i = 0; i < plan.recvcols.size(); ++i) {
         int j = plan.recvcols[i];
         int idx = g2l[(size_t)j];
@@ -689,160 +685,51 @@ static inline void exchange_ghost_values(const GhostPlan& plan,
             MPI_Abort(MPI_COMM_WORLD, 3);
         }
 #endif
-        sendvals[i] = x_local[(size_t)idx];
+        plan.tmp_sendvals[i] = x_local[(size_t)idx];
     }
 
-    // receive values for my requested ghost columns (same order as sendcols)
-    std::vector<double> recvvals(plan.sendcols.size());
-
-    MPI_Alltoallv(sendvals.data(), plan.recvcounts.data(), plan.rdispls.data(), MPI_DOUBLE,
-                  recvvals.data(), plan.sendcounts.data(), plan.sdispls.data(), MPI_DOUBLE,
+    // Receive values for my requested ghost columns (same order as sendcols)
+    MPI_Alltoallv(plan.tmp_sendvals.data(), plan.recvcounts.data(), plan.rdispls.data(), MPI_DOUBLE,
+                  plan.tmp_recvvals.data(), plan.sendcounts.data(), plan.sdispls.data(), MPI_DOUBLE,
                   MPI_COMM_WORLD);
 
-    // write ghosts into x_local at precomputed local indices
-    for (size_t k = 0; k < recvvals.size(); ++k) {
+    // Write ghosts into x_local at precomputed local indices
+    for (size_t k = 0; k < plan.tmp_recvvals.size(); ++k) {
         int lidx = plan.ghost_lidx[k];
-        x_local[(size_t)lidx] = recvvals[k];
+        x_local[(size_t)lidx] = plan.tmp_recvvals[k];
     }
 }
 
 // ============================================================
-// Logging (human readable + TSV) like D1
-// Primary metrics: E2E (comm+compute) to keep scripts stable.
-// Extra metrics: compute-only + comm-only.
+// Memory footprint + comm volume helpers
 // ============================================================
 
-static void append_log_rank0(const char* argv0,
-                            const std::string& mtx,
-                            int M, int N,
-                            long long nz_header,
-                            long long nz_used,
-                            int ranks,
-                            int threads,
-                            const std::string& schedule,
-                            int chunk,
-                            int warmup,
-                            int repeats,
-                            int trials,
-                            int sort_rows,
-                            int do_validation,
-                            const ValidationResult& vres,
-                            double p90_e2e_ms,
-                            double p90_comp_ms,
-                            double p90_comm_ms,
-                            double gflops_e2e,
-                            double gbps_e2e,
-                            double gflops_comp,
-                            double gbps_comp)
+template <typename T>
+static inline long long bytes_of_vec(const std::vector<T>& v) {
+    // model: capacity * sizeof(T) (closer to real allocation than size)
+    return (long long)v.capacity() * (long long)sizeof(T);
+}
+
+static inline long long memory_bytes_csr(const CSRLocal& A) {
+    return bytes_of_vec(A.rowptr) + bytes_of_vec(A.col) + bytes_of_vec(A.val);
+}
+
+static inline long long memory_bytes_plan(const GhostPlan& plan) {
+    return bytes_of_vec(plan.sendcounts) + bytes_of_vec(plan.sdispls) + bytes_of_vec(plan.sendcols) + bytes_of_vec(plan.ghost_lidx)
+         + bytes_of_vec(plan.recvcounts) + bytes_of_vec(plan.rdispls) + bytes_of_vec(plan.recvcols)
+         + bytes_of_vec(plan.tmp_sendvals) + bytes_of_vec(plan.tmp_recvvals);
+}
+
+// per-iteration comm volume (values exchange only)
+static inline void comm_bytes_per_iter_values_only(const GhostPlan& plan,
+                                                   long long& sent_bytes,
+                                                   long long& recv_bytes)
 {
-    try {
-        fs::path root = repo_root_from_exe(argv0);
-        fs::path results_dir = root / "results";
-        fs::create_directories(results_dir);
-
-        fs::path log_path = results_dir / "spmv_mpi_results.txt";
-        bool write_header = !fs::exists(log_path);
-
-        std::ofstream fout(log_path, std::ios::app);
-        if (!fout) {
-            std::cerr << "[warning] Could not write results to: " << log_path << "\n";
-            return;
-        }
-
-        if (write_header) {
-            fout << "SpMV MPI Benchmark - Run Log\n\n";
-        }
-
-        auto now   = std::chrono::system_clock::now();
-        std::time_t t_c = std::chrono::system_clock::to_time_t(now);
-        std::tm* tm = std::localtime(&t_c);
-
-        std::ostringstream validation_line;
-        validation_line.setf(std::ios::scientific, std::ios::floatfield);
-        validation_line << "rel_L2_error=" << (long double)vres.rel_L2_error
-                        << ", max_abs_error=" << (long double)vres.max_abs_error;
-
-        fout << "=================================================================\n";
-        fout << "Run at " << std::put_time(tm, "%Y-%m-%d %H:%M:%S") << "\n";
-        fout << "Matrix    : " << mtx
-             << " (" << M << " x " << N
-             << ", nnz(header) = " << nz_header
-             << ", nnz(used) = "   << nz_used << ")\n";
-        fout << "Config    : ranks=" << ranks
-             << ", threads=" << threads
-             << ", schedule=" << lower_copy(schedule)
-             << "(chunk=" << chunk << ")"
-             << ", warmup=" << warmup
-             << ", repeats=" << repeats
-             << ", trials=" << trials
-             << ", sort_rows=" << sort_rows
-             << ", validation=" << do_validation << "\n";
-        fout << "I/O       : MPI-IO chunk parsing (redistributed by row owner)\n";
-        fout << "Comm      : ghost exchange via Alltoallv of double values (each iteration)\n";
-        if (do_validation) fout << "Validation: " << validation_line.str() << "\n";
-        else              fout << "Validation: (skipped)\n";
-
-        fout << std::fixed << std::setprecision(3);
-        fout << "Results   : P90_e2e_ms=" << p90_e2e_ms
-             << ", GFLOPS_e2e=" << gflops_e2e
-             << ", GBps_e2e=" << gbps_e2e << "\n";
-        fout << "           : P90_comp_ms=" << p90_comp_ms
-             << ", GFLOPS_comp=" << gflops_comp
-             << ", GBps_comp=" << gbps_comp << "\n";
-        fout << "           : P90_comm_ms=" << p90_comm_ms << "\n";
-        fout << "=================================================================\n\n";
-    } catch (const std::exception& e) {
-        std::cerr << "[warning] Exception while writing results file: " << e.what() << "\n";
-    }
-
-    // TSV one-line per run
-    try {
-        fs::path root = repo_root_from_exe(argv0);
-        fs::path results_dir = root / "results";
-        fs::create_directories(results_dir);
-
-        fs::path tsv_path = results_dir / "spmv_mpi_results.tsv";
-        bool write_header = !fs::exists(tsv_path);
-
-        std::ofstream fout(tsv_path, std::ios::app);
-        if (!fout) {
-            std::cerr << "[warning] Could not write TSV to: " << tsv_path << "\n";
-            return;
-        }
-
-        if (write_header) {
-            fout << "timestamp\tmatrix\tM\tN\tnz_header\tnz_used\tranks\tthreads\tsched\tchunk\twarmup\trepeats\ttrials\tsort_rows\t"
-                    "p90_e2e_ms\tp90_comp_ms\tp90_comm_ms\tgflops_e2e\tgbps_e2e\tgflops_comp\tgbps_comp\tvalidation\trelL2\tmaxAbs\n";
-        }
-
-        auto now   = std::chrono::system_clock::now();
-        std::time_t t_c = std::chrono::system_clock::to_time_t(now);
-        std::tm* tm = std::localtime(&t_c);
-
-        std::ostringstream ts;
-        ts << std::put_time(tm, "%Y-%m-%d_%H:%M:%S");
-
-        fout << ts.str() << "\t"
-             << mtx << "\t"
-             << M << "\t" << N << "\t"
-             << nz_header << "\t" << nz_used << "\t"
-             << ranks << "\t" << threads << "\t"
-             << lower_copy(schedule) << "\t" << chunk << "\t"
-             << warmup << "\t" << repeats << "\t" << trials << "\t"
-             << sort_rows << "\t"
-             << std::setprecision(9) << p90_e2e_ms << "\t"
-             << std::setprecision(9) << p90_comp_ms << "\t"
-             << std::setprecision(9) << p90_comm_ms << "\t"
-             << std::setprecision(9) << gflops_e2e << "\t"
-             << std::setprecision(9) << gbps_e2e << "\t"
-             << std::setprecision(9) << gflops_comp << "\t"
-             << std::setprecision(9) << gbps_comp << "\t"
-             << do_validation << "\t"
-             << (do_validation ? (double)vres.rel_L2_error : 0.0) << "\t"
-             << (do_validation ? (double)vres.max_abs_error : 0.0) << "\n";
-    } catch (...) {
-        // ignore
-    }
+    // Each iter:
+    //  - I send responses for recvcols -> sendvals size = recvcols.size() doubles
+    //  - I receive values for my ghosts -> recvvals size = sendcols.size() doubles
+    sent_bytes = (long long)plan.recvcols.size() * 8LL;
+    recv_bytes = (long long)plan.sendcols.size() * 8LL;
 }
 
 // ============================================================
@@ -922,7 +809,7 @@ int main(int argc, char** argv)
     std::vector<COOEntry> coo_local;
     parallel_read_matrix_market_mpiio(mtxResolved.c_str(), rank, P, M, N, nz_header, coo_local);
 
-    // IMPORTANT FIX: redistribute by row owner so coo_local becomes correct local COO
+    // Redistribute by row owner so coo_local becomes correct local COO
     redistribute_coo_by_row_owner(coo_local, rank, P);
 
     // Build CSR local
@@ -941,17 +828,86 @@ int main(int argc, char** argv)
     build_ghost_plan_and_x(rank, P, N, A.col, x_local, g2l, plan);
     exchange_ghost_values(plan, g2l, x_local); // fill ghosts once before warmup/timing
 
-    // Warmup: do BOTH (comm + compute) so caches/state are realistic
+    // Warmup: do BOTH (comm + compute)
     std::vector<double> y_local;
     for (int w=0; w<warmup; ++w) {
         exchange_ghost_values(plan, g2l, x_local);
         spmv_csr_local_omp_runtime(A, x_local, g2l, y_local);
     }
 
-    // Timing samples: for each iteration we measure:
-    //  - comm-only
-    //  - compute-only
-    //  - end-to-end (comm+compute)
+    // ============================================================
+    // Memory footprint + comm volume measurements (model-based)
+    // ============================================================
+
+    // local memory (bytes)
+    long long mem_csr   = memory_bytes_csr(A);
+    long long mem_x     = bytes_of_vec(x_local);
+    long long mem_y     = bytes_of_vec(y_local);
+    long long mem_g2l   = bytes_of_vec(g2l);
+    long long mem_plan  = memory_bytes_plan(plan);
+
+    long long mem_total = mem_csr + mem_x + mem_y + mem_g2l + mem_plan;
+
+    // comm volume per iteration (values exchange only)
+    long long comm_sent_B = 0, comm_recv_B = 0;
+    comm_bytes_per_iter_values_only(plan, comm_sent_B, comm_recv_B);
+    long long comm_tot_B = comm_sent_B + comm_recv_B;
+
+    // Reduce memory stats to rank0
+    double mem_total_d = (double)mem_total;
+    double mem_csr_d   = (double)mem_csr;
+    double mem_x_d     = (double)mem_x;
+    double mem_y_d     = (double)mem_y;
+    double mem_g2l_d   = (double)mem_g2l;
+    double mem_plan_d  = (double)mem_plan;
+
+    double mem_total_sum=0, mem_total_max=0;
+    double mem_csr_sum=0,   mem_csr_max=0;
+    double mem_x_sum=0,     mem_x_max=0;
+    double mem_y_sum=0,     mem_y_max=0;
+    double mem_g2l_sum=0,   mem_g2l_max=0;
+    double mem_plan_sum=0,  mem_plan_max=0;
+
+    MPI_Reduce(&mem_total_d, &mem_total_sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&mem_total_d, &mem_total_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    MPI_Reduce(&mem_csr_d,   &mem_csr_sum,   1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&mem_csr_d,   &mem_csr_max,   1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    MPI_Reduce(&mem_x_d,     &mem_x_sum,     1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&mem_x_d,     &mem_x_max,     1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    MPI_Reduce(&mem_y_d,     &mem_y_sum,     1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&mem_y_d,     &mem_y_max,     1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    MPI_Reduce(&mem_g2l_d,   &mem_g2l_sum,   1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&mem_g2l_d,   &mem_g2l_max,   1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    MPI_Reduce(&mem_plan_d,  &mem_plan_sum,  1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&mem_plan_d,  &mem_plan_max,  1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    // Reduce comm stats to rank0
+    double comm_sent_d = (double)comm_sent_B;
+    double comm_recv_d = (double)comm_recv_B;
+    double comm_tot_d  = (double)comm_tot_B;
+
+    double comm_sent_sum=0, comm_sent_max=0;
+    double comm_recv_sum=0, comm_recv_max=0;
+    double comm_tot_sum=0,  comm_tot_max=0;
+
+    MPI_Reduce(&comm_sent_d, &comm_sent_sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&comm_sent_d, &comm_sent_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    MPI_Reduce(&comm_recv_d, &comm_recv_sum, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&comm_recv_d, &comm_recv_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    MPI_Reduce(&comm_tot_d,  &comm_tot_sum,  1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&comm_tot_d,  &comm_tot_max,  1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+    // ============================================================
+    // Timing samples: comm-only, compute-only, end-to-end
+    // ============================================================
+
     std::vector<double> samples_e2e_ms;
     std::vector<double> samples_comp_ms;
     std::vector<double> samples_comm_ms;
@@ -1000,10 +956,13 @@ int main(int argc, char** argv)
         p90_comm_ms = percentile90_ms_from_samples(samples_comm_ms);
     }
 
-    // Validation placeholder (kept)
+    // Validation placeholder
     ValidationResult vres{};
 
-    // Compute perf numbers on rank0 using nnz_used (correct)
+    // ============================================================
+    // Output (keep parsing compatibility)
+    // ============================================================
+
     if (rank == 0) {
         const long long nnz = nnz_used;
 
@@ -1014,30 +973,40 @@ int main(int argc, char** argv)
         };
 
         auto gbps_from_ms = [&](double ms)->double {
-            // Simple byte model (same as your previous)
             double bytes = (double)nnz * (8.0 + 4.0 + 8.0) + (double)M * 8.0;
             return (ms > 0.0)
                 ? bytes / (ms / 1000.0) / 1e9
                 : std::numeric_limits<double>::infinity();
         };
 
-        // END-TO-END (comm + compute) -> PRIMARY (scripts parse this)
+        // End-to-end (PRIMARY for scripts)
         double gflops_e2e = gflops_from_ms(p90_e2e_ms);
         double gbps_e2e   = gbps_from_ms(p90_e2e_ms);
 
-        // COMPUTE-ONLY
+        // Compute-only
         double gflops_comp = gflops_from_ms(p90_comp_ms);
         double gbps_comp   = gbps_from_ms(p90_comp_ms);
 
-        // Real used threads
         int used_threads = omp_used_threads();
 
-        // Effective OpenMP schedule (truth source)
         omp_sched_t sched_now;
         int chunk_now;
         omp_get_schedule(&sched_now, &chunk_now);
 
-        // Output (keep compatibility: ONE "Throughput" and ONE "Estimated bandwidth")
+        auto B_to_MiB = [&](double B)->double { return B / (1024.0 * 1024.0); };
+        auto B_to_KiB = [&](double B)->double { return B / 1024.0; };
+
+        double mem_total_avg = mem_total_sum / (double)P;
+        double mem_csr_avg   = mem_csr_sum   / (double)P;
+        double mem_x_avg     = mem_x_sum     / (double)P;
+        double mem_y_avg     = mem_y_sum     / (double)P;
+        double mem_g2l_avg   = mem_g2l_sum   / (double)P;
+        double mem_plan_avg  = mem_plan_sum  / (double)P;
+
+        double comm_sent_avg = comm_sent_sum / (double)P;
+        double comm_recv_avg = comm_recv_sum / (double)P;
+        double comm_tot_avg  = comm_tot_sum  / (double)P;
+
         std::cout << std::fixed << std::setprecision(3);
 
         std::cout << "\n=================================================================\n";
@@ -1059,12 +1028,37 @@ int main(int argc, char** argv)
         std::cout << "  Number of trials     : " << trials << "\n";
         std::cout << "  Sort CSR rows        : " << (sort_rows ? "yes" : "no") << "\n";
         std::cout << "  I/O                  : MPI-IO chunk parsing (redistributed by row owner)\n";
-        std::cout << "  Comm                 : ghost exchange (Alltoallv) each iteration\n";
+        std::cout << "  Comm                 : ghost exchange (Alltoallv values) each iteration\n";
         std::cout << "  Time metric          : 90th percentile (P90) of max-rank time\n\n";
 
         std::cerr << "[validation] skipped\n";
 
-        std::cout << "\nRESULTS (END-TO-END: COMM + COMPUTE)\n";
+        std::cout << "MEMORY FOOTPRINT (MODEL, based on vector capacity)\n";
+        std::cout << "  Per-rank avg (MiB)   : total=" << B_to_MiB(mem_total_avg)
+                  << "  [CSR=" << B_to_MiB(mem_csr_avg)
+                  << ", x_local=" << B_to_MiB(mem_x_avg)
+                  << ", y_local=" << B_to_MiB(mem_y_avg)
+                  << ", g2l=" << B_to_MiB(mem_g2l_avg)
+                  << ", plan/buffers=" << B_to_MiB(mem_plan_avg) << "]\n";
+        std::cout << "  Per-rank max (MiB)   : total=" << B_to_MiB(mem_total_max)
+                  << "  [CSR=" << B_to_MiB(mem_csr_max)
+                  << ", x_local=" << B_to_MiB(mem_x_max)
+                  << ", y_local=" << B_to_MiB(mem_y_max)
+                  << ", g2l=" << B_to_MiB(mem_g2l_max)
+                  << ", plan/buffers=" << B_to_MiB(mem_plan_max) << "]\n\n";
+
+        std::cout << "COMMUNICATION VOLUME (VALUES ONLY, per iteration)\n";
+        std::cout << "  Per-rank avg (KiB)   : sent=" << B_to_KiB(comm_sent_avg)
+                  << ", recv=" << B_to_KiB(comm_recv_avg)
+                  << ", total=" << B_to_KiB(comm_tot_avg) << "\n";
+        std::cout << "  Per-rank max (KiB)   : sent=" << B_to_KiB(comm_sent_max)
+                  << ", recv=" << B_to_KiB(comm_recv_max)
+                  << ", total=" << B_to_KiB(comm_tot_max) << "\n";
+        std::cout << "  Global total (KiB)   : sent=" << B_to_KiB(comm_sent_sum)
+                  << ", recv=" << B_to_KiB(comm_recv_sum)
+                  << ", total=" << B_to_KiB(comm_tot_sum) << "\n\n";
+
+        std::cout << "RESULTS (END-TO-END: COMM + COMPUTE)\n";
         std::cout << "  P90 execution time   : " << p90_e2e_ms << " ms\n";
         std::cout << "  Throughput           : " << gflops_e2e << " GFLOPS\n";
         std::cout << "  Estimated bandwidth  : " << gbps_e2e << " GB/s\n\n";
@@ -1078,20 +1072,6 @@ int main(int argc, char** argv)
         std::cout << "  Comm-only P90 time   : " << p90_comm_ms << " ms\n\n";
 
         std::cout << "=================================================================\n\n";
-
-        // Write results
-        append_log_rank0(argv[0], mtxResolved, M, N,
-                         (long long)nz_header, nnz_used,
-                         P, used_threads,
-                         omp_sched_name(sched_now), chunk_now,
-                         warmup, repeats, trials,
-                         sort_rows, /*do_validation*/0, vres,
-                         p90_e2e_ms, p90_comp_ms, p90_comm_ms,
-                         gflops_e2e, gbps_e2e,
-                         gflops_comp, gbps_comp);
-
-        fs::path root = repo_root_from_exe(argv[0]);
-        std::cout << "[Rank0] Results appended to " << (root / "results" / "spmv_mpi_results.txt") << "\n";
     }
 
     MPI_Finalize();

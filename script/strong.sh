@@ -1,148 +1,100 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
-export LC_NUMERIC=C
 
-EXE=${EXE:-"./bin/spmv_mpi"}
-MATRIX=${1:-"bin/matrices/kron_g500-logn21.mtx"}
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+EXE="$REPO_ROOT/bin/spmv_mpi"
+OUTDIR="$REPO_ROOT/results"
+OUT="$OUTDIR/strong.txt"
 
-THREADS=${THREADS:-1}
-SCHED=${SCHED:-static}
-CHUNK=${CHUNK:-64}
-REPEATS=${REPEATS:-10}
-TRIALS=${TRIALS:-5}
-
-PROCS_LIST=(${PROCS_LIST:-1 2 4 8 16 32 64 128})
-
-OUTDIR="results"
-OUTFILE="${OUTDIR}/strong.txt"
 mkdir -p "$OUTDIR"
+export MATRICES_DIR="$REPO_ROOT/bin/matrices"
 
-export OMP_NUM_THREADS="$THREADS"
-export OMP_PROC_BIND=true
-export OMP_PLACES=cores
-export OMPI_MCA_btl=${OMPI_MCA_btl:-"^openib"}
+# ---------------- CONFIG ----------------
+MATRIX_NAME="${1:-kron_g500-logn21.mtx}"   # oppure quello che usi tu
+THREADS="${2:-1}"
+SCHED="${3:-static}"
+CHUNK="${4:-64}"
+REPEATS="${5:-10}"
+TRIALS="${6:-5}"
 
-if [[ ! -x "$EXE" ]]; then
-  echo "[fatal] executable not found: $EXE" >&2
-  exit 1
-fi
+P_LIST=(1 2 4 8 16 32 64 128)
+# ---------------------------------------
 
-# --- pretty table formatting (spaces + fixed widths) ---
-HDR_FMT="%-4s %12s %14s %12s %12s %12s %15s %15s\n"
-ROW_FMT="%-4s %12s %14s %12s %12s %12s %15s %15s\n"
-
-# Header
 {
   echo "==== Strong Scaling Run ===="
   echo "date: $(date)"
   echo "host: $(hostname)"
-  echo "exe: $EXE"
-  echo "matrix: $MATRIX"
+  echo "exe:  $EXE"
+  echo "matrix: $MATRIX_NAME"
   echo "threads: $THREADS"
   echo "schedule: $SCHED chunk=$CHUNK"
   echo "repeats: $REPEATS trials: $TRIALS"
-  echo "P list: ${PROCS_LIST[*]}"
+  echo "P list: ${P_LIST[*]}"
   echo
-  printf "$HDR_FMT" \
-    "P" "p90_e2e_ms" "p90_compute_ms" "p90_comm_ms" \
-    "gflops_e2e" "gbps_e2e" "gflops_compute" "gbps_compute"
-} > "$OUTFILE"
+  printf "%-6s %-12s %-14s %-12s %-12s %-12s %-12s %-12s %-14s %-14s %-14s %-14s\n" \
+    "P" "p90_e2e_ms" "p90_comp_ms" "p90_comm_ms" \
+    "gflops_e2e" "gbps_e2e" "gflops_comp" "gbps_comp" \
+    "commKiB_max" "memMiB_max" "speedup_e2e" "eff_e2e"
+} > "$OUT"
 
-extract_number() {
-  # $1 = regex/pattern, returns first numeric token after ':'
-  echo "$OUT" | awk -F':' -v pat="$1" '
-    $0 ~ pat {
-      s=$2
-      gsub(/[^0-9eE\.\+\-]/, "", s)
-      if (s != "") { print s; exit }
-    }'
-}
+T1_E2E=""
 
-extract_M() {
-  echo "$OUT" | awk '
-    /Dimensions/ {
-      s=$0
-      gsub(/[^0-9]/, " ", s)
-      split(s,a," ")
-      for(i=1;i<=length(a);i++) if(a[i]!=""){ print a[i]; exit }
-    }'
-}
+for P in "${P_LIST[@]}"; do
+  echo "[run] P=$P ..." >&2
 
-extract_nnz_used() {
-  echo "$OUT" | awk '
-    /Non-zero entries/ {
-      split($0, parts, ":")
-      s=parts[2]
-      gsub(/[^0-9]/, " ", s)
-      split(s,a," ")
-      for(i=1;i<=length(a);i++) if(a[i]!=""){ print a[i]; exit }
-    }'
-}
+  # Esegui da repo root (così path relativi stabili)
+  OUTRUN=$(
+    cd "$REPO_ROOT"
+    mpirun -np "$P" --bind-to none "$EXE" "$MATRIX_NAME" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS"
+  )
 
-calc_gflops() {
-  awk -v nnz="$1" -v tms="$2" 'BEGIN{
-    if (tms<=0) { print "inf"; exit }
-    printf "%.6f", (2.0*nnz)/((tms/1000.0)*1e9)
-  }'
-}
+  # ---- parse tempi / perf ----
+  p90_e2e=$(echo "$OUTRUN" | awk -F': ' '/P90 execution time/{print $2}' | awk '{print $1}' | tail -n1)
+  p90_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only P90 time/{print $2}' | awk '{print $1}' | tail -n1)
+  p90_comm=$(echo "$OUTRUN" | awk -F': ' '/Comm-only P90 time/{print $2}' | awk '{print $1}' | tail -n1)
 
-calc_gbps() {
-  awk -v nnz="$1" -v M="$2" -v tms="$3" 'BEGIN{
-    if (tms<=0) { print "inf"; exit }
-    bytes = nnz*(8+4+8) + M*8
-    printf "%.6f", bytes/((tms/1000.0)*1e9)
-  }'
-}
+  gflops_e2e=$(echo "$OUTRUN" | awk -F': ' '/Throughput/{print $2}' | awk '{print $1}' | tail -n1)
+  gbps_e2e=$(echo "$OUTRUN" | awk -F': ' '/Estimated bandwidth/{print $2}' | awk '{print $1}' | tail -n1)
 
-for P in "${PROCS_LIST[@]}"; do
-  echo "[run] P=$P ..." >&2   # progress in logs/strong.out, NOT in strong.txt
+  gflops_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only GFLOPS/{print $2}' | awk '{print $1}' | tail -n1)
+  gbps_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only BW/{print $2}' | awk '{print $1}' | tail -n1)
 
-  MAP_ARGS=()
-  if [[ "$P" -le 72 ]]; then
-    MAP_ARGS=(--map-by "ppr:${P}:node:pe=1" --bind-to core)
+  # comm total per iter (per-rank max total=XXX)
+  commKiB_max=$(
+    echo "$OUTRUN" | awk '
+      /Per-rank max \(KiB\)/{
+        # riga tipo: Per-rank max (KiB)   : sent=..., recv=..., total=123.456
+        for(i=1;i<=NF;i++){
+          if($i ~ /^total=/){gsub("total=","",$i); print $i}
+        }
+      }' | tail -n1
+  )
+
+  # mem total max
+  memMiB_max=$(
+    echo "$OUTRUN" | awk '
+      /Per-rank max \(MiB\)/{
+        # riga tipo: Per-rank max (MiB)   : total=12.345  [CSR=...
+        for(i=1;i<=NF;i++){
+          if($i ~ /^total=/){gsub("total=","",$i); print $i}
+        }
+      }' | tail -n1
+  )
+
+  # speedup/eff e2e (solo strong)
+  if [[ "$P" -eq 1 ]]; then
+    T1_E2E="$p90_e2e"
+    speedup="1.000"
+    eff="1.000"
   else
-    MAP_ARGS=(--map-by "ppr:72:node:pe=1" --bind-to core)
+    speedup=$(awk -v t1="$T1_E2E" -v tp="$p90_e2e" 'BEGIN{printf "%.3f", (tp>0)?(t1/tp):0}')
+    eff=$(awk -v s="$speedup" -v p="$P" 'BEGIN{printf "%.3f", (p>0)?(s/p):0}')
   fi
 
-  set +e
-  OUT=$(mpirun -np "$P" "${MAP_ARGS[@]}" "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate 2>&1)
-  RC=$?
-  set -e
-
-  if [[ $RC -ne 0 ]]; then
-    {
-      echo
-      echo "[fatal] mpirun failed at P=$P (rc=$RC). Output:"
-      echo "$OUT"
-    } >> "$OUTFILE"
-    exit $RC
-  fi
-
-  # Times (ms)
-  P90_E2E=$(extract_number "P90 execution time")
-  P90_COMP=$(extract_number "Compute-only P90 time")
-  P90_COMM=$(extract_number "Comm-only P90 time")
-
-  # fallback (se non presenti le nuove righe)
-  [[ -n "${P90_E2E:-}" ]] || { echo "[fatal] missing P90 execution time at P=$P" >&2; exit 2; }
-  [[ -n "${P90_COMP:-}" ]] || P90_COMP="$P90_E2E"
-  [[ -n "${P90_COMM:-}" ]] || P90_COMM="0"
-
-  # Parse M and nnz_used from program output
-  M=$(extract_M)
-  NNZ=$(extract_nnz_used)
-  [[ -n "${M:-}" && -n "${NNZ:-}" ]] || { echo "[fatal] missing M/nnz at P=$P" >&2; exit 2; }
-
-  # Compute metrics for both times
-  GF_E2E=$(calc_gflops "$NNZ" "$P90_E2E")
-  GB_E2E=$(calc_gbps   "$NNZ" "$M" "$P90_E2E")
-  GF_COMP=$(calc_gflops "$NNZ" "$P90_COMP")
-  GB_COMP=$(calc_gbps   "$NNZ" "$M" "$P90_COMP")
-
-  # Pretty aligned row
-  printf "$ROW_FMT" \
-    "$P" "$P90_E2E" "$P90_COMP" "$P90_COMM" \
-    "$GF_E2E" "$GB_E2E" "$GF_COMP" "$GB_COMP" >> "$OUTFILE"
+  printf "%-6d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-12.3f %-12.3f %-14.3f %-14.3f %-14.3f %-14.3f\n" \
+    "$P" "$p90_e2e" "$p90_comp" "$p90_comm" \
+    "$gflops_e2e" "$gbps_e2e" "$gflops_comp" "$gbps_comp" \
+    "${commKiB_max:-0}" "${memMiB_max:-0}" "$speedup" "$eff" >> "$OUT"
 done
 
-echo "Saved results to: $OUTFILE" >&2
+echo "[done] wrote $OUT" >&2
