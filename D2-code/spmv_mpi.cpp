@@ -55,6 +55,24 @@ struct ValidationResult {
     long double max_abs_error = 0.0L;
 };
 
+// Ghost exchange plan (precomputed once, used every iteration)
+struct GhostPlan {
+    int P = 1;
+
+    // My requests to owners (columns I need)
+    std::vector<int> sendcounts;   // size P
+    std::vector<int> sdispls;      // size P
+    std::vector<int> sendcols;     // size sum(sendcounts)
+    std::vector<int> ghost_lidx;   // same size as sendcols: where to write received values in x_local
+
+    // Requests received from others (columns others need from me)
+    std::vector<int> recvcounts;   // size P (how many each rank asks from me)
+    std::vector<int> rdispls;      // size P
+    std::vector<int> recvcols;     // size sum(recvcounts)
+
+    bool has_ghosts() const { return !sendcols.empty() || !recvcols.empty(); }
+};
+
 // ============================================================
 // Small utilities (D1-like)
 // ============================================================
@@ -498,100 +516,6 @@ static void sort_csr_rows_by_col(CSRLocal& A)
 }
 
 // ============================================================
-// Build x_local (owned + ghosts) via Alltoallv request/response
-// g2l: size N, g2l[col] -> index in x_local (owned or ghost)
-// ============================================================
-
-static void build_x_and_exchange_ghosts_alltoallv(int rank, int P, int N,
-                                                  const std::vector<int>& colind,
-                                                  std::vector<double>& x_local,
-                                                  std::vector<int>& g2l)
-{
-    g2l.assign(N, -1);
-    x_local.clear();
-
-    // Owned x entries (cyclic by column owner = j%P)
-    for (int j = rank; j < N; j += P) {
-        g2l[j] = (int)x_local.size();
-        x_local.push_back(x_value(j));
-    }
-
-    // Ghost detection without seen(N): sort+unique on colind
-    std::vector<int> cols = colind;
-    std::sort(cols.begin(), cols.end());
-    cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
-
-    std::vector<int> ghost_cols;
-    ghost_cols.reserve(cols.size());
-    for (int j : cols) {
-        if (j < 0 || j >= N) continue;
-        if ((j % P) != rank) ghost_cols.push_back(j);
-    }
-
-    // Group requests by owner
-    std::vector<int> sendcounts(P, 0);
-    for (int j : ghost_cols) sendcounts[j % P]++;
-
-    std::vector<int> sdispls(P, 0);
-    for (int p = 1; p < P; ++p)
-        sdispls[p] = sdispls[p - 1] + sendcounts[p - 1];
-
-    std::vector<int> sendbuf((size_t)ghost_cols.size());
-    {
-        std::vector<int> tmp = sdispls;
-        for (int j : ghost_cols) {
-            int p = j % P;
-            sendbuf[(size_t)tmp[p]++] = j;
-        }
-    }
-
-    // Exchange counts
-    std::vector<int> recvcounts(P, 0);
-    MPI_Alltoall(sendcounts.data(), 1, MPI_INT,
-                 recvcounts.data(), 1, MPI_INT,
-                 MPI_COMM_WORLD);
-
-    std::vector<int> rdispls(P, 0);
-    int tot_recv = 0;
-    for (int p = 0; p < P; ++p) {
-        rdispls[p] = tot_recv;
-        tot_recv += recvcounts[p];
-    }
-
-    // Receive requests
-    std::vector<int> recvbuf((size_t)tot_recv);
-    MPI_Alltoallv(sendbuf.data(), sendcounts.data(), sdispls.data(), MPI_INT,
-                  recvbuf.data(), recvcounts.data(), rdispls.data(), MPI_INT,
-                  MPI_COMM_WORLD);
-
-    // Prepare responses (values for requested columns)
-    std::vector<double> sendvals((size_t)tot_recv);
-    for (int i = 0; i < tot_recv; ++i) {
-        int j = recvbuf[(size_t)i];
-        sendvals[(size_t)i] = x_value(j);
-    }
-
-    // Receive values for my requests
-    std::vector<double> recvvals(sendbuf.size());
-    MPI_Alltoallv(sendvals.data(), recvcounts.data(), rdispls.data(), MPI_DOUBLE,
-                  recvvals.data(), sendcounts.data(), sdispls.data(), MPI_DOUBLE,
-                  MPI_COMM_WORLD);
-
-    // Append ghosts in same order as sendbuf
-    size_t idx = 0;
-    for (int p = 0; p < P; ++p) {
-        for (int k = 0; k < sendcounts[p]; ++k) {
-            int j = sendbuf[(size_t)sdispls[p] + (size_t)k];
-            if (g2l[j] == -1) {
-                g2l[j] = (int)x_local.size();
-                x_local.push_back(recvvals[idx]);
-            }
-            idx++;
-        }
-    }
-}
-
-// ============================================================
 // OpenMP schedule(runtime) + omp_set_schedule()
 // ============================================================
 
@@ -644,7 +568,7 @@ static void spmv_csr_local_omp_runtime(const CSRLocal& A,
                 MPI_Abort(MPI_COMM_WORLD, 2);
             }
 #endif
-            sum += A.val[k] * x_local[idx];
+            sum += A.val[k] * x_local[(size_t)idx];
         }
         y_local[(size_t)r] = sum;
     }
@@ -665,8 +589,127 @@ static double percentile90_ms_from_samples(std::vector<double>& samples)
 }
 
 // ============================================================
+// Ghost plan build + per-iteration exchange (values only)
+// ============================================================
+
+static void build_ghost_plan_and_x(int rank, int P, int N,
+                                   const std::vector<int>& colind,
+                                   std::vector<double>& x_local,
+                                   std::vector<int>& g2l,
+                                   GhostPlan& plan)
+{
+    plan = GhostPlan{};
+    plan.P = P;
+
+    // g2l for all global columns (fits your typical N; keep as in your code)
+    g2l.assign((size_t)N, -1);
+    x_local.clear();
+    x_local.reserve((size_t)(N / std::max(1, P)) + 1024);
+
+    // Owned x entries (cyclic by column owner = j%P)
+    for (int j = rank; j < N; j += P) {
+        g2l[(size_t)j] = (int)x_local.size();
+        x_local.push_back(x_value(j));
+    }
+
+    // Unique columns touched by local CSR
+    std::vector<int> cols = colind;
+    std::sort(cols.begin(), cols.end());
+    cols.erase(std::unique(cols.begin(), cols.end()), cols.end());
+
+    std::vector<int> ghost_cols;
+    ghost_cols.reserve(cols.size());
+    for (int j : cols) {
+        if (j < 0 || j >= N) continue;
+        if ((j % P) != rank) ghost_cols.push_back(j);
+    }
+
+    // Requests grouped by owner
+    plan.sendcounts.assign(P, 0);
+    for (int j : ghost_cols) plan.sendcounts[j % P]++;
+
+    plan.sdispls.assign(P, 0);
+    for (int p = 1; p < P; ++p)
+        plan.sdispls[p] = plan.sdispls[p - 1] + plan.sendcounts[p - 1];
+
+    plan.sendcols.resize((size_t)ghost_cols.size());
+    {
+        std::vector<int> cursor = plan.sdispls;
+        for (int j : ghost_cols) {
+            int owner = j % P;
+            plan.sendcols[(size_t)cursor[owner]++] = j;
+        }
+    }
+
+    // Allocate ghost slots in x_local + fill ghost_lidx (same order as sendcols)
+    plan.ghost_lidx.resize(plan.sendcols.size());
+    for (size_t k = 0; k < plan.sendcols.size(); ++k) {
+        int j = plan.sendcols[k];
+        if (g2l[(size_t)j] == -1) {
+            g2l[(size_t)j] = (int)x_local.size();
+            x_local.push_back(0.0); // placeholder, will be filled by exchange
+        }
+        plan.ghost_lidx[k] = g2l[(size_t)j];
+    }
+
+    // Exchange counts: recvcounts[p] = how many columns rank p asks from me
+    plan.recvcounts.assign(P, 0);
+    MPI_Alltoall(plan.sendcounts.data(), 1, MPI_INT,
+                 plan.recvcounts.data(), 1, MPI_INT,
+                 MPI_COMM_WORLD);
+
+    plan.rdispls.assign(P, 0);
+    int tot_recv = 0;
+    for (int p = 0; p < P; ++p) {
+        plan.rdispls[p] = tot_recv;
+        tot_recv += plan.recvcounts[p];
+    }
+    plan.recvcols.resize((size_t)tot_recv);
+
+    // Receive requested column IDs (others -> me)
+    MPI_Alltoallv(plan.sendcols.data(), plan.sendcounts.data(), plan.sdispls.data(), MPI_INT,
+                  plan.recvcols.data(), plan.recvcounts.data(), plan.rdispls.data(), MPI_INT,
+                  MPI_COMM_WORLD);
+}
+
+static inline void exchange_ghost_values(const GhostPlan& plan,
+                                        const std::vector<int>& g2l,
+                                        std::vector<double>& x_local)
+{
+    if (!plan.has_ghosts()) return;
+
+    // send back values for columns others requested from me
+    std::vector<double> sendvals(plan.recvcols.size());
+    for (size_t i = 0; i < plan.recvcols.size(); ++i) {
+        int j = plan.recvcols[i];
+        int idx = g2l[(size_t)j];
+#if SPMV_CHECK_G2L
+        if (idx < 0 || idx >= (int)x_local.size()) {
+            std::cerr << "[fatal] exchange_ghost_values: missing owned g2l for col " << j << "\n";
+            MPI_Abort(MPI_COMM_WORLD, 3);
+        }
+#endif
+        sendvals[i] = x_local[(size_t)idx];
+    }
+
+    // receive values for my requested ghost columns (same order as sendcols)
+    std::vector<double> recvvals(plan.sendcols.size());
+
+    MPI_Alltoallv(sendvals.data(), plan.recvcounts.data(), plan.rdispls.data(), MPI_DOUBLE,
+                  recvvals.data(), plan.sendcounts.data(), plan.sdispls.data(), MPI_DOUBLE,
+                  MPI_COMM_WORLD);
+
+    // write ghosts into x_local at precomputed local indices
+    for (size_t k = 0; k < recvvals.size(); ++k) {
+        int lidx = plan.ghost_lidx[k];
+        x_local[(size_t)lidx] = recvvals[k];
+    }
+}
+
+// ============================================================
 // Logging (human readable + TSV) like D1
-// (keeps same file names; adds nnz_used info)
+// Primary metrics: E2E (comm+compute) to keep scripts stable.
+// Extra metrics: compute-only + comm-only.
 // ============================================================
 
 static void append_log_rank0(const char* argv0,
@@ -684,9 +727,13 @@ static void append_log_rank0(const char* argv0,
                             int sort_rows,
                             int do_validation,
                             const ValidationResult& vres,
-                            double p90_ms,
-                            double gflops,
-                            double gbps)
+                            double p90_e2e_ms,
+                            double p90_comp_ms,
+                            double p90_comm_ms,
+                            double gflops_e2e,
+                            double gbps_e2e,
+                            double gflops_comp,
+                            double gbps_comp)
 {
     try {
         fs::path root = repo_root_from_exe(argv0);
@@ -730,14 +777,19 @@ static void append_log_rank0(const char* argv0,
              << ", trials=" << trials
              << ", sort_rows=" << sort_rows
              << ", validation=" << do_validation << "\n";
-        fout << "I/O       : MPI-IO chunk parsing (coordinate real), overlap boundary handling\n";
+        fout << "I/O       : MPI-IO chunk parsing (redistributed by row owner)\n";
+        fout << "Comm      : ghost exchange via Alltoallv of double values (each iteration)\n";
         if (do_validation) fout << "Validation: " << validation_line.str() << "\n";
         else              fout << "Validation: (skipped)\n";
 
         fout << std::fixed << std::setprecision(3);
-        fout << "Results   : p90_ms=" << p90_ms
-             << ", GFLOPS=" << gflops
-             << ", GBps=" << gbps << "\n";
+        fout << "Results   : P90_e2e_ms=" << p90_e2e_ms
+             << ", GFLOPS_e2e=" << gflops_e2e
+             << ", GBps_e2e=" << gbps_e2e << "\n";
+        fout << "           : P90_comp_ms=" << p90_comp_ms
+             << ", GFLOPS_comp=" << gflops_comp
+             << ", GBps_comp=" << gbps_comp << "\n";
+        fout << "           : P90_comm_ms=" << p90_comm_ms << "\n";
         fout << "=================================================================\n\n";
     } catch (const std::exception& e) {
         std::cerr << "[warning] Exception while writing results file: " << e.what() << "\n";
@@ -759,7 +811,8 @@ static void append_log_rank0(const char* argv0,
         }
 
         if (write_header) {
-            fout << "timestamp\tmatrix\tM\tN\tnz_header\tnz_used\tranks\tthreads\tsched\tchunk\twarmup\trepeats\ttrials\tsort_rows\tp90_ms\tgflops\tgbps\tvalidation\trelL2\tmaxAbs\n";
+            fout << "timestamp\tmatrix\tM\tN\tnz_header\tnz_used\tranks\tthreads\tsched\tchunk\twarmup\trepeats\ttrials\tsort_rows\t"
+                    "p90_e2e_ms\tp90_comp_ms\tp90_comm_ms\tgflops_e2e\tgbps_e2e\tgflops_comp\tgbps_comp\tvalidation\trelL2\tmaxAbs\n";
         }
 
         auto now   = std::chrono::system_clock::now();
@@ -777,9 +830,13 @@ static void append_log_rank0(const char* argv0,
              << lower_copy(schedule) << "\t" << chunk << "\t"
              << warmup << "\t" << repeats << "\t" << trials << "\t"
              << sort_rows << "\t"
-             << std::setprecision(9) << p90_ms << "\t"
-             << std::setprecision(9) << gflops << "\t"
-             << std::setprecision(9) << gbps << "\t"
+             << std::setprecision(9) << p90_e2e_ms << "\t"
+             << std::setprecision(9) << p90_comp_ms << "\t"
+             << std::setprecision(9) << p90_comm_ms << "\t"
+             << std::setprecision(9) << gflops_e2e << "\t"
+             << std::setprecision(9) << gbps_e2e << "\t"
+             << std::setprecision(9) << gflops_comp << "\t"
+             << std::setprecision(9) << gbps_comp << "\t"
              << do_validation << "\t"
              << (do_validation ? (double)vres.rel_L2_error : 0.0) << "\t"
              << (do_validation ? (double)vres.max_abs_error : 0.0) << "\n";
@@ -877,58 +934,100 @@ int main(int argc, char** argv)
     long long nnz_used  = 0;
     MPI_Allreduce(&local_nnz, &nnz_used, 1, MPI_LONG_LONG, MPI_SUM, MPI_COMM_WORLD);
 
-    // Build x_local + ghosts
+    // Build x_local + ghost plan (precompute), then do one initial exchange
     std::vector<double> x_local;
     std::vector<int> g2l;
-    build_x_and_exchange_ghosts_alltoallv(rank, P, N, A.col, x_local, g2l);
+    GhostPlan plan;
+    build_ghost_plan_and_x(rank, P, N, A.col, x_local, g2l, plan);
+    exchange_ghost_values(plan, g2l, x_local); // fill ghosts once before warmup/timing
 
-    // Warmup
+    // Warmup: do BOTH (comm + compute) so caches/state are realistic
     std::vector<double> y_local;
     for (int w=0; w<warmup; ++w) {
+        exchange_ghost_values(plan, g2l, x_local);
         spmv_csr_local_omp_runtime(A, x_local, g2l, y_local);
     }
 
-    // Timing samples (P90), measure MAX over ranks each sample
-    std::vector<double> samples_ms;
-    if (rank == 0) samples_ms.reserve((size_t)repeats * (size_t)trials);
+    // Timing samples: for each iteration we measure:
+    //  - comm-only
+    //  - compute-only
+    //  - end-to-end (comm+compute)
+    std::vector<double> samples_e2e_ms;
+    std::vector<double> samples_comp_ms;
+    std::vector<double> samples_comm_ms;
+
+    if (rank == 0) {
+        size_t cap = (size_t)repeats * (size_t)trials;
+        samples_e2e_ms.reserve(cap);
+        samples_comp_ms.reserve(cap);
+        samples_comm_ms.reserve(cap);
+    }
 
     for (int t=0; t<trials; ++t) {
         for (int r=0; r<repeats; ++r) {
             MPI_Barrier(MPI_COMM_WORLD);
+
             double t0 = MPI_Wtime();
-            spmv_csr_local_omp_runtime(A, x_local, g2l, y_local);
+            exchange_ghost_values(plan, g2l, x_local);
             double t1 = MPI_Wtime();
+            spmv_csr_local_omp_runtime(A, x_local, g2l, y_local);
+            double t2 = MPI_Wtime();
 
-            double local_ms = (t1 - t0) * 1000.0;
-            double max_ms = 0.0;
-            MPI_Reduce(&local_ms, &max_ms, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+            double local_comm_ms = (t1 - t0) * 1000.0;
+            double local_comp_ms = (t2 - t1) * 1000.0;
+            double local_e2e_ms  = (t2 - t0) * 1000.0;
 
-            if (rank == 0) samples_ms.push_back(max_ms);
+            double max_comm_ms = 0.0, max_comp_ms = 0.0, max_e2e_ms = 0.0;
+            MPI_Reduce(&local_comm_ms, &max_comm_ms, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+            MPI_Reduce(&local_comp_ms, &max_comp_ms, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+            MPI_Reduce(&local_e2e_ms,  &max_e2e_ms,  1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+            if (rank == 0) {
+                samples_comm_ms.push_back(max_comm_ms);
+                samples_comp_ms.push_back(max_comp_ms);
+                samples_e2e_ms.push_back(max_e2e_ms);
+            }
         }
     }
 
-    double p90_ms = 0.0;
+    double p90_e2e_ms  = 0.0;
+    double p90_comp_ms = 0.0;
+    double p90_comm_ms = 0.0;
+
     if (rank == 0) {
-        p90_ms = percentile90_ms_from_samples(samples_ms);
+        p90_e2e_ms  = percentile90_ms_from_samples(samples_e2e_ms);
+        p90_comp_ms = percentile90_ms_from_samples(samples_comp_ms);
+        p90_comm_ms = percentile90_ms_from_samples(samples_comm_ms);
     }
 
-    // Validation disabled by default in your strong scaling (keep placeholder)
+    // Validation placeholder (kept)
     ValidationResult vres{};
-    // (left as-is; you can re-add validate function if you want, but for kron_g500 is huge)
 
     // Compute perf numbers on rank0 using nnz_used (correct)
     if (rank == 0) {
         const long long nnz = nnz_used;
 
-        double gflops = (p90_ms > 0.0)
-            ? (2.0 * (double)nnz) / (p90_ms / 1000.0) / 1e9
-            : std::numeric_limits<double>::infinity();
+        auto gflops_from_ms = [&](double ms)->double {
+            return (ms > 0.0)
+                ? (2.0 * (double)nnz) / (ms / 1000.0) / 1e9
+                : std::numeric_limits<double>::infinity();
+        };
 
-        // Simple byte model
-        double bytes = (double)nnz * (8.0 + 4.0 + 8.0) + (double)M * 8.0;
-        double gbps = (p90_ms > 0.0)
-            ? bytes / (p90_ms / 1000.0) / 1e9
-            : std::numeric_limits<double>::infinity();
+        auto gbps_from_ms = [&](double ms)->double {
+            // Simple byte model (same as your previous)
+            double bytes = (double)nnz * (8.0 + 4.0 + 8.0) + (double)M * 8.0;
+            return (ms > 0.0)
+                ? bytes / (ms / 1000.0) / 1e9
+                : std::numeric_limits<double>::infinity();
+        };
+
+        // END-TO-END (comm + compute) -> PRIMARY (scripts parse this)
+        double gflops_e2e = gflops_from_ms(p90_e2e_ms);
+        double gbps_e2e   = gbps_from_ms(p90_e2e_ms);
+
+        // COMPUTE-ONLY
+        double gflops_comp = gflops_from_ms(p90_comp_ms);
+        double gbps_comp   = gbps_from_ms(p90_comp_ms);
 
         // Real used threads
         int used_threads = omp_used_threads();
@@ -938,7 +1037,7 @@ int main(int argc, char** argv)
         int chunk_now;
         omp_get_schedule(&sched_now, &chunk_now);
 
-        // Output (keep same format)
+        // Output (keep compatibility: ONE "Throughput" and ONE "Estimated bandwidth")
         std::cout << std::fixed << std::setprecision(3);
 
         std::cout << "\n=================================================================\n";
@@ -960,23 +1059,36 @@ int main(int argc, char** argv)
         std::cout << "  Number of trials     : " << trials << "\n";
         std::cout << "  Sort CSR rows        : " << (sort_rows ? "yes" : "no") << "\n";
         std::cout << "  I/O                  : MPI-IO chunk parsing (redistributed by row owner)\n";
+        std::cout << "  Comm                 : ghost exchange (Alltoallv) each iteration\n";
         std::cout << "  Time metric          : 90th percentile (P90) of max-rank time\n\n";
 
         std::cerr << "[validation] skipped\n";
 
-        std::cout << "\nRESULTS\n";
-        std::cout << "  P90 execution time   : " << p90_ms << " ms\n";
-        std::cout << "  Throughput           : " << gflops << " GFLOPS\n";
-        std::cout << "  Estimated bandwidth  : " << gbps << " GB/s\n\n";
+        std::cout << "\nRESULTS (END-TO-END: COMM + COMPUTE)\n";
+        std::cout << "  P90 execution time   : " << p90_e2e_ms << " ms\n";
+        std::cout << "  Throughput           : " << gflops_e2e << " GFLOPS\n";
+        std::cout << "  Estimated bandwidth  : " << gbps_e2e << " GB/s\n\n";
+
+        std::cout << "EXTRA RESULTS (COMPUTE-ONLY)\n";
+        std::cout << "  Compute-only P90 time: " << p90_comp_ms << " ms\n";
+        std::cout << "  Compute-only GFLOPS  : " << gflops_comp << " GFLOPS\n";
+        std::cout << "  Compute-only BW      : " << gbps_comp << " GB/s\n\n";
+
+        std::cout << "EXTRA RESULTS (COMM-ONLY)\n";
+        std::cout << "  Comm-only P90 time   : " << p90_comm_ms << " ms\n\n";
+
         std::cout << "=================================================================\n\n";
 
-        // Write results like D1
+        // Write results
         append_log_rank0(argv[0], mtxResolved, M, N,
                          (long long)nz_header, nnz_used,
                          P, used_threads,
-                         omp_sched_name(sched_now), chunk_now, warmup, repeats, trials,
+                         omp_sched_name(sched_now), chunk_now,
+                         warmup, repeats, trials,
                          sort_rows, /*do_validation*/0, vres,
-                         p90_ms, gflops, gbps);
+                         p90_e2e_ms, p90_comp_ms, p90_comm_ms,
+                         gflops_e2e, gbps_e2e,
+                         gflops_comp, gbps_comp);
 
         fs::path root = repo_root_from_exe(argv[0]);
         std::cout << "[Rank0] Results appended to " << (root / "results" / "spmv_mpi_results.txt") << "\n";
