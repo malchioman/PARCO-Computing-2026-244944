@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -7,29 +7,29 @@ GEN="$REPO_ROOT/bin/custom_matrix"
 OUTDIR="$REPO_ROOT/results"
 OUT="$OUTDIR/weak.txt"
 
-mkdir -p "$OUTDIR" "$REPO_ROOT/bin/matrices"
+mkdir -p "$OUTDIR"
 export MATRICES_DIR="$REPO_ROOT/bin/matrices"
+mkdir -p "$MATRICES_DIR"
 
-THREADS="${THREADS:-1}"
-SCHED="${SCHED:-static}"
-CHUNK="${CHUNK:-64}"
-REPEATS="${REPEATS:-10}"
-TRIALS="${TRIALS:-5}"
+# ---------------- CONFIG ----------------
+THREADS="${1:-1}"
+SCHED="${2:-static}"
+CHUNK="${3:-64}"
+REPEATS="${4:-10}"
+TRIALS="${5:-5}"
 
-ROWS_PER_RANK="${ROWS_PER_RANK:-16384}"
-NNZ_PER_RANK="${NNZ_PER_RANK:-1000000}"
+ROWS_PER_RANK="${6:-16384}"
+NNZ_PER_RANK="${7:-1000000}"
 
-P_LIST=(${PROCS_LIST:-1 2 4 8 16 32 64 128})
-
-[[ -x "$EXE" ]] || { echo "[fatal] missing EXE: $EXE" >&2; exit 1; }
-[[ -x "$GEN" ]] || { echo "[fatal] missing GEN: $GEN" >&2; exit 1; }
+P_LIST=(1 2 4 8 16 32 64 128)
+# ---------------------------------------
 
 {
   echo "==== Weak Scaling Run ===="
   echo "date: $(date)"
   echo "host: $(hostname)"
-  echo "exe: $EXE"
-  echo "gen: $GEN"
+  echo "exe:  $EXE"
+  echo "gen:  $GEN"
   echo "threads: $THREADS"
   echo "schedule: $SCHED chunk=$CHUNK"
   echo "repeats: $REPEATS trials: $TRIALS"
@@ -37,10 +37,10 @@ P_LIST=(${PROCS_LIST:-1 2 4 8 16 32 64 128})
   echo "nnz_per_rank:  $NNZ_PER_RANK"
   echo "P list: ${P_LIST[*]}"
   echo
-  printf "%-4s %-10s %-10s %-12s %-12s %-14s %-12s %-12s %-12s %-14s %-12s\n" \
+  printf "%-4s %-10s %-10s %-12s %-12s %-14s %-12s %-12s %-12s %-14s %-14s\n" \
     "P" "rows" "cols" "nnz" \
-    "p90_e2e_ms" "p90_compute_ms" "p90_comm_ms" \
-    "gflops_e2e" "gbps_e2e" "gflops_compute" "gbps_compute"
+    "p90_e2e_ms" "p90_comp_ms" "p90_comm_ms" \
+    "gflops_e2e" "gbps_e2e" "gflops_comp" "gbps_comp"
 } > "$OUT"
 
 for P in "${P_LIST[@]}"; do
@@ -49,50 +49,35 @@ for P in "${P_LIST[@]}"; do
   nnz=$((NNZ_PER_RANK * P))
 
   mtx="weak_P${P}_rpr${ROWS_PER_RANK}_nnzpr${NNZ_PER_RANK}.mtx"
-  mtx_rel="bin/matrices/$mtx"              # <=== IMPORTANTE: path passato al generator
-  mtx_path="$REPO_ROOT/$mtx_rel"
+  mtx_path="$MATRICES_DIR/$mtx"
 
-  echo "[gen] P=$P -> $mtx_path (rows=$rows cols=$cols nnz=$nnz)" >&2
+  echo "[gen] P=$P -> $mtx (rows=$rows cols=$cols nnz=$nnz)" >&2
 
-  # custom_matrix: <out_path_or_name> <rows> <cols> <nnz>
-  ( cd "$REPO_ROOT" && "$GEN" "$mtx_rel" "$rows" "$cols" "$nnz" >/dev/null )
+  # Il TUO custom_matrix: ./custom_matrix <out_path_or_name> <rows> <cols> <nnz>
+  ( cd "$REPO_ROOT" && "$GEN" "$mtx_path" "$rows" "$cols" "$nnz" >/dev/null )
 
-  [[ -f "$mtx_path" ]] || { echo "[fatal] generator did not create: $mtx_path" >&2; exit 1; }
+  if [[ ! -f "$mtx_path" ]]; then
+    echo "[fatal] generator did not create: $mtx_path" >&2
+    exit 1
+  fi
 
   echo "[run] P=$P ..." >&2
-
-  MAP_ARGS=()
-  if [[ "$P" -le 72 ]]; then
-    MAP_ARGS=(--map-by "ppr:${P}:node:pe=1" --bind-to core)
-  else
-    MAP_ARGS=(--map-by "ppr:72:node:pe=1" --bind-to core)
-  fi
-
-  set +e
   OUTRUN=$(
     cd "$REPO_ROOT"
-    mpirun -np "$P" "${MAP_ARGS[@]}" \
-      "$EXE" "$mtx" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate 2>&1
+    mpirun -np "$P" --bind-to none "$EXE" "$mtx" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS"
   )
-  RC=$?
-  set -e
-  if [[ $RC -ne 0 ]]; then
-    echo "[fatal] mpirun failed at P=$P (rc=$RC). Output:" >> "$OUT"
-    echo "$OUTRUN" >> "$OUT"
-    exit $RC
-  fi
 
-  p90_e2e=$(echo "$OUTRUN" | awk -F':' '/P90 execution time/ {gsub(/ ms/,"",$2); sub(/^[ \t]+/,"",$2); print $2}' | tail -n1)
-  p90_comp=$(echo "$OUTRUN" | awk -F':' '/Compute-only P90 time/ {gsub(/ ms/,"",$2); sub(/^[ \t]+/,"",$2); print $2}' | tail -n1)
-  p90_comm=$(echo "$OUTRUN" | awk -F':' '/Comm-only P90 time/ {gsub(/ ms/,"",$2); sub(/^[ \t]+/,"",$2); print $2}' | tail -n1)
+  p90_e2e=$(echo "$OUTRUN" | awk -F': ' '/P90 execution time/{print $2}' | awk '{print $1}' | tail -n1)
+  p90_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only P90 time/{print $2}' | awk '{print $1}' | tail -n1)
+  p90_comm=$(echo "$OUTRUN" | awk -F': ' '/Comm-only P90 time/{print $2}' | awk '{print $1}' | tail -n1)
 
-  gflops_e2e=$(echo "$OUTRUN" | awk -F':' '/Throughput/ {gsub(/ GFLOPS/,"",$2); sub(/^[ \t]+/,"",$2); print $2}' | tail -n1)
-  gbps_e2e=$(echo "$OUTRUN" | awk -F':' '/Estimated bandwidth/ {gsub(/ GB\/s/,"",$2); sub(/^[ \t]+/,"",$2); print $2}' | tail -n1)
+  gflops_e2e=$(echo "$OUTRUN" | awk -F': ' '/Throughput/{print $2}' | awk '{print $1}' | tail -n1)
+  gbps_e2e=$(echo "$OUTRUN" | awk -F': ' '/Estimated bandwidth/{print $2}' | awk '{print $1}' | tail -n1)
 
-  gflops_comp=$(echo "$OUTRUN" | awk -F':' '/Compute-only GFLOPS/ {gsub(/ GFLOPS/,"",$2); sub(/^[ \t]+/,"",$2); print $2}' | tail -n1)
-  gbps_comp=$(echo "$OUTRUN" | awk -F':' '/Compute-only BW/ {gsub(/ GB\/s/,"",$2); sub(/^[ \t]+/,"",$2); print $2}' | tail -n1)
+  gflops_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only GFLOPS/{print $2}' | awk '{print $1}' | tail -n1)
+  gbps_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only BW/{print $2}' | awk '{print $1}' | tail -n1)
 
-  printf "%-4d %-10d %-10d %-12d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-14.3f %-12.3f\n" \
+  printf "%-4d %-10d %-10d %-12d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-14.3f %-14.3f\n" \
     "$P" "$rows" "$cols" "$nnz" \
     "${p90_e2e:-0}" "${p90_comp:-0}" "${p90_comm:-0}" \
     "${gflops_e2e:-0}" "${gbps_e2e:-0}" "${gflops_comp:-0}" "${gbps_comp:-0}" >> "$OUT"
