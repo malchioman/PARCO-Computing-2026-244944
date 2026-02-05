@@ -6,21 +6,19 @@
 #PBS -j oe
 #PBS -o logs/weak.out
 
-set -euo pipefail
-
 cd "$PBS_O_WORKDIR"
+set -euo pipefail
 
 module purge
 module load gcc91
 module load openmpi-3.0.0--gcc-9.1.0
 module load cmake-3.15.4
 
-mkdir -p logs results
+mkdir -p logs results bin/matrices
 chmod +x script/weak.sh
 
-# Parametri weak
+# Parametri weak scaling
 export ROWS_PER_RANK=16384
 export NNZ_PER_RANK=1000000
 
-# Lancia (non serve REPO_ROOT qui)
-./script/weak.sh 1 static 64 10 5 "$ROWS_PER_RANK" "$NNZ_PER_RANK"
+./script/weak.sh
