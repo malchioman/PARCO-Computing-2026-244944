@@ -3,53 +3,60 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 EXE="$REPO_ROOT/bin/spmv_mpi"
-OUT="$REPO_ROOT/results/strong.txt"
+OUTDIR="$REPO_ROOT/results"
+OUT="$OUTDIR/strong.txt"
 
+mkdir -p "$OUTDIR"
 export MATRICES_DIR="$REPO_ROOT/bin/matrices"
 
-THREADS=1
-SCHED=static
-CHUNK=64
-REPEATS=10
-TRIALS=5
+# ---------------- CONFIG ----------------
+MATRIX="${1:?Usage: strong.sh <matrix.mtx> [threads] [sched] [chunk] [repeats] [trials]}"
+THREADS="${2:-1}"
+SCHED="${3:-static}"
+CHUNK="${4:-64}"
+REPEATS="${5:-10}"
+TRIALS="${6:-5}"
 
-MTX="strong_matrix.mtx"
 P_LIST=(1 2 4 8 16 32 64 128)
+# ---------------------------------------
 
 {
   echo "==== Strong Scaling Run ===="
   echo "date: $(date)"
   echo "host: $(hostname)"
-  echo "matrix: $MTX"
+  echo "exe:  $EXE"
+  echo "matrix: $MATRIX"
   echo "threads: $THREADS"
   echo "schedule: $SCHED chunk=$CHUNK"
   echo "repeats: $REPEATS trials: $TRIALS"
+  echo "P list: ${P_LIST[*]}"
   echo
-  printf "%-6s %-12s %-14s %-12s %-12s %-12s %-12s\n" \
+  printf "%-4s %-12s %-14s %-12s %-12s %-12s %-14s %-14s\n" \
     "P" "p90_e2e_ms" "p90_comp_ms" "p90_comm_ms" \
-    "gflops_e2e" "gflops_comp" "speedup"
+    "gflops_e2e" "gbps_e2e" "gflops_comp" "gbps_comp"
 } > "$OUT"
 
-T1=""
-
 for P in "${P_LIST[@]}"; do
+  echo "[run] P=$P ..." >&2
+
   OUTRUN=$(
-    mpirun -np "$P" \
-      --bind-to none \
-      --map-by slot \
-      --oversubscribe \
-      "$EXE" "$MTX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate
+    cd "$REPO_ROOT"
+    mpirun -np "$P" --bind-to none "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS"
   )
 
-  p90=$(echo "$OUTRUN" | awk -F': ' '/P90 execution time/{print $2}' | awk '{print $1}')
-  p90c=$(echo "$OUTRUN" | awk -F': ' '/Compute-only P90 time/{print $2}' | awk '{print $1}')
-  p90m=$(echo "$OUTRUN" | awk -F': ' '/Comm-only P90 time/{print $2}' | awk '{print $1}')
-  gfe=$(echo "$OUTRUN" | awk -F': ' '/Throughput/{print $2}' | awk '{print $1}')
-  gfc=$(echo "$OUTRUN" | awk -F': ' '/Compute-only GFLOPS/{print $2}' | awk '{print $1}')
+  p90_e2e=$(echo "$OUTRUN" | awk -F': ' '/P90 execution time/{print $2}' | awk '{print $1}' | tail -n1)
+  p90_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only P90 time/{print $2}' | awk '{print $1}' | tail -n1)
+  p90_comm=$(echo "$OUTRUN" | awk -F': ' '/Comm-only P90 time/{print $2}' | awk '{print $1}' | tail -n1)
 
-  if [[ -z "$T1" ]]; then T1="$p90"; fi
-  speedup=$(awk "BEGIN {printf \"%.3f\", $T1/$p90}")
+  gflops_e2e=$(echo "$OUTRUN" | awk -F': ' '/Throughput/{print $2}' | awk '{print $1}' | tail -n1)
+  gbps_e2e=$(echo "$OUTRUN" | awk -F': ' '/Estimated bandwidth/{print $2}' | awk '{print $1}' | tail -n1)
 
-  printf "%-6d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-12.3f\n" \
-    "$P" "$p90" "$p90c" "$p90m" "$gfe" "$gfc" "$speedup" >> "$OUT"
+  gflops_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only GFLOPS/{print $2}' | awk '{print $1}' | tail -n1)
+  gbps_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only BW/{print $2}' | awk '{print $1}' | tail -n1)
+
+  printf "%-4d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-14.3f %-14.3f\n" \
+    "$P" "${p90_e2e:-0}" "${p90_comp:-0}" "${p90_comm:-0}" \
+    "${gflops_e2e:-0}" "${gbps_e2e:-0}" "${gflops_comp:-0}" "${gbps_comp:-0}" >> "$OUT"
 done
+
+echo "[done] wrote $OUT" >&2
