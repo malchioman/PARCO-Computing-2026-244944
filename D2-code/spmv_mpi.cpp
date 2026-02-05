@@ -170,7 +170,6 @@ static int omp_used_threads()
 
 // ============================================================
 // Deterministic "random-like" x[j] (no need to store full x)
-// (Gaussian mean 0 std 10, seed fixed)
 // ============================================================
 
 static inline uint64_t splitmix64(uint64_t x) {
@@ -738,9 +737,6 @@ static double bytes_to_kib(size_t b) {
 
 // ============================================================
 // Validation
-//   - rank0 reads matrix sequentially, builds CSR, computes y_ref
-//   - gather y_local into y_global, compare
-//   - auto-skip on very large instances unless --validate-force
 // ============================================================
 
 struct CSRFull {
@@ -755,7 +751,6 @@ static bool read_matrix_market_rank0_sequential(const std::string& path, CSRFull
     FILE* f = std::fopen(path.c_str(), "r");
     if (!f) return false;
 
-    // skip comments + banner line(s)
     char buf[4096];
     bool got_dims = false;
     int M=0, N=0, nz=0;
@@ -835,8 +830,6 @@ static bool validate_on_rank0(const std::string& mtxResolved,
                              bool force_validate,
                              long long nnz_used_global)
 {
-    // Safety threshold (avoid exploding on huge matrices)
-    // You can tune; force with --validate-force.
     const long long MAX_NNZ_VALIDATE = 5'000'000LL; // 5M entries
     const long long MAX_M_VALIDATE   = 2'000'000LL; // 2M rows
 
@@ -846,9 +839,6 @@ static bool validate_on_rank0(const std::string& mtxResolved,
         }
     }
 
-    // rank0 has to rebuild y_global from y_local pieces:
-    // cyclic row distribution: rows i where i%P==rank
-    // So we need gather all y_local to rank0 with Gatherv.
     std::vector<int> recvcounts(P,0), displs(P,0);
     for (int r=0;r<P;r++) recvcounts[r] = num_local_rows_cyclic(M, r, P);
     for (int r=1;r<P;r++) displs[r] = displs[r-1] + recvcounts[r-1];
@@ -859,9 +849,6 @@ static bool validate_on_rank0(const std::string& mtxResolved,
                 y_gather.data(), recvcounts.data(), displs.data(), MPI_DOUBLE,
                 0, MPI_COMM_WORLD);
 
-    // Convert cyclic-packed y_gather into true row order:
-    // In y_gather we placed blocks per rank in rank order (Gatherv).
-    // We must map back: for each rank r, local index lr -> global row gi = r + lr*P.
     std::vector<double> y_global((size_t)M, 0.0);
     for (int r=0;r<P;r++) {
         int base = displs[r];
@@ -872,7 +859,6 @@ static bool validate_on_rank0(const std::string& mtxResolved,
         }
     }
 
-    // Build reference on rank0
     CSRFull Afull;
     long long nz_header_ref = 0;
     if (!read_matrix_market_rank0_sequential(mtxResolved, Afull, nz_header_ref)) {
@@ -883,14 +869,13 @@ static bool validate_on_rank0(const std::string& mtxResolved,
     std::vector<double> y_ref;
     spmv_csr_full(Afull, y_ref);
 
-    // Compare
     long double num = 0.0L;
     long double den = 0.0L;
     long double max_abs = 0.0L;
 
     for (int i=0;i<M;i++) {
         long double diff = (long double)y_global[(size_t)i] - (long double)y_ref[(size_t)i];
-        long double ad   = (long double)std::fabs(diff); // portable
+        long double ad   = (long double)std::fabs(diff);
         if (ad > max_abs) max_abs = ad;
 
         num += diff*diff;
@@ -901,7 +886,7 @@ static bool validate_on_rank0(const std::string& mtxResolved,
     out.max_abs_error = max_abs;
     out.rel_L2_error  = (den > 0.0L) ? std::sqrt(num/den) : std::sqrt(num);
 
-    return true; // performed
+    return true;
 }
 
 // ============================================================
@@ -1127,7 +1112,7 @@ int main(int argc, char** argv)
     CSRLocal A = coo_to_csr_cyclic_rows(coo_local, M, rank, P);
     if (sort_rows) sort_csr_rows_by_col(A);
 
-    // Free COO to reduce memory footprint (important on big runs)
+    // Free COO to reduce memory footprint
     std::vector<COOEntry>().swap(coo_local);
 
     // nnz_used = sum actual nnz across ranks
@@ -1141,8 +1126,6 @@ int main(int argc, char** argv)
     GhostPlan plan;
     build_ghost_plan_and_x(rank, P, N, A.col, x_owned_and_ghosts, g2l, plan);
 
-    // x_work is the mutable version where we overwrite ghosts each iteration.
-    // Owned part is same; ghosts updated by exchange_ghost_values.
     std::vector<double> x_work = x_owned_and_ghosts;
     exchange_ghost_values(plan, g2l, x_owned_and_ghosts, x_work);
 
@@ -1202,14 +1185,21 @@ int main(int argc, char** argv)
         p90_comm_ms = percentile90_ms_from_samples(samples_comm_ms);
     }
 
-    // Comm volume per iter (only double exchange), per rank:
-    // sent = #ghosts requested * sizeof(double)
-    // recv = #ghosts received = sendcols.size() * sizeof(double)
-    // Actually each rank receives sendcols.size() doubles.
-    size_t local_comm_bytes_iter = (plan.sendcols.size() + plan.recvcols.size()) * sizeof(double);
+    // ============================================================
+    // COMMUNICATION VOLUME PER ITERATION (ghost exchange only)
+    //
+    // - recvcols.size(): how many doubles I SEND (others request from me)
+    // - sendcols.size(): how many doubles I RECEIVE (I request from others)
+    //
+    // total_per_rank = (send + recv) * sizeof(double)
+    // ============================================================
 
-    size_t max_comm_bytes_iter = 0;
-    size_t sum_comm_bytes_iter = 0;
+    const unsigned long long local_comm_bytes_iter =
+        (unsigned long long)(plan.sendcols.size() + plan.recvcols.size()) * (unsigned long long)sizeof(double);
+
+    unsigned long long max_comm_bytes_iter = 0ULL;
+    unsigned long long sum_comm_bytes_iter = 0ULL;
+
     MPI_Reduce(&local_comm_bytes_iter, &max_comm_bytes_iter, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(&local_comm_bytes_iter, &sum_comm_bytes_iter, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
 
@@ -1232,18 +1222,22 @@ int main(int argc, char** argv)
         bytes_of_vector_double(plan.tmp_recvvals) +
         bytes_of_vector_double(y_local);
 
-    size_t max_mem_bytes = 0;
-    size_t sum_mem_bytes = 0;
-    MPI_Reduce(&mem_bytes, &max_mem_bytes, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
-    MPI_Reduce(&mem_bytes, &sum_mem_bytes, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    unsigned long long max_mem_bytes = 0ULL;
+    unsigned long long sum_mem_bytes = 0ULL;
+    {
+        const unsigned long long local_mem = (unsigned long long)mem_bytes;
+        MPI_Reduce(&local_mem, &max_mem_bytes, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, 0, MPI_COMM_WORLD);
+        MPI_Reduce(&local_mem, &sum_mem_bytes, 1, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    }
 
     double commKiB_max = 0.0, commKiB_avg = 0.0;
     double memMiB_max = 0.0, memMiB_avg = 0.0;
     if (rank == 0) {
-        commKiB_max = bytes_to_kib(max_comm_bytes_iter);
-        commKiB_avg = bytes_to_kib(sum_comm_bytes_iter / (size_t)std::max(1, P));
-        memMiB_max = bytes_to_mib(max_mem_bytes);
-        memMiB_avg = bytes_to_mib(sum_mem_bytes / (size_t)std::max(1, P));
+        commKiB_max = bytes_to_kib((size_t)max_comm_bytes_iter);
+        commKiB_avg = bytes_to_kib((size_t)(sum_comm_bytes_iter / (unsigned long long)std::max(1, P)));
+
+        memMiB_max = bytes_to_mib((size_t)max_mem_bytes);
+        memMiB_avg = bytes_to_mib((size_t)(sum_mem_bytes / (unsigned long long)std::max(1, P)));
     }
 
     // Validation
@@ -1268,7 +1262,6 @@ int main(int argc, char** argv)
         };
 
         auto gbps_from_ms = [&](double ms)->double {
-            // Simple byte model
             double bytes = (double)nnz_used * (8.0 + 4.0 + 8.0) + (double)M * 8.0;
             return (ms > 0.0)
                 ? bytes / (ms / 1000.0) / 1e9
@@ -1340,7 +1333,7 @@ int main(int argc, char** argv)
         std::cout << "EXTRA RESULTS (COMM-ONLY)\n";
         std::cout << "  Comm-only P90 time   : " << p90_comm_ms << " ms\n\n";
 
-        // These two lines are parsed by your scripts (awk)
+        // These two lines are parsed by your scripts (awk) -> DO NOT CHANGE WORDING
         std::cout << "COMM VOLUME PER ITERATION (ghost doubles only)\n";
         std::cout << "  Per-rank max (KiB): total=" << commKiB_max << "  avg=" << commKiB_avg << "\n";
         std::cout << "MEMORY FOOTPRINT (rough estimate)\n";
