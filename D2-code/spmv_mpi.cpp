@@ -244,18 +244,20 @@ static MPI_Datatype make_mpi_coo_type()
 // MPI-IO helpers: read large ranges in pieces (avoid int limit)
 // ============================================================
 
-static void mpi_file_read_at_all_big(MPI_File fh, MPI_Offset off,
-                                     char* buf, MPI_Offset len)
+static void mpi_file_read_at_big(MPI_File fh, MPI_Offset off,
+                                 char* buf, MPI_Offset len)
 {
     const MPI_Offset MAX = (MPI_Offset)std::numeric_limits<int>::max();
     MPI_Offset done = 0;
     while (done < len) {
         MPI_Offset chunk = std::min(MAX, len - done);
         MPI_Status st;
-        MPI_File_read_at_all(fh, off + done, buf + (size_t)done, (int)chunk, MPI_CHAR, &st);
+        // NOT collective -> avoids deadlock when len differs among ranks
+        MPI_File_read_at(fh, off + done, buf + (size_t)done, (int)chunk, MPI_CHAR, &st);
         done += chunk;
     }
 }
+
 
 // ============================================================
 // MatrixMarket parsing
@@ -364,7 +366,8 @@ static void parallel_read_matrix_market_mpiio(const char* path,
     MPI_Offset read_len = read_end - read_start;
 
     std::vector<char> raw((size_t)read_len, '\0');
-    mpi_file_read_at_all_big(fh, read_start, raw.data(), read_len);
+
+     mpi_file_read_at_big(fh, read_start, raw.data(), read_len);
 
     MPI_File_close(&fh);
 
