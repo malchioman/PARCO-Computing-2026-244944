@@ -1,0 +1,46 @@
+SpMV MPI Benchmark - Run Log
+
+=================================================================
+Run at 2026-02-05 12:42:15
+Matrix    : matrices/./irreg_50k.mtx (50000 x 50000, nnz(header) = 1050000, nnz(used) = 1049999)
+Config    : ranks=2, threads=4, schedule=dynamic(chunk=64), warmup=2, repeats=2, trials=1, sort_rows=0, validation=0, validation_performed=0
+Times     : P90_e2e_ms=0.463, P90_comp_ms=0.403, P90_comm_ms=0.061
+Perf      : GFLOPS_e2e=4.539, GBps_e2e=46.253, GFLOPS_comp=5.212, GBps_comp=53.115
+Comm/Iter : Per-rank max (KiB): total=390.609
+Memory    : Per-rank max (MiB): total=7.915
+Validation: disabled (--no-validate)
+=================================================================
+
+=================================================================
+Run at 2026-02-05 13:07:59
+Matrix    : matrices/./irreg_50k.mtx (50000 x 50000, nnz(header) = 1050000, nnz(used) = 1049999)
+Config    : ranks=2, threads=4, schedule=dynamic(chunk=64), warmup=2, repeats=2, trials=1, sort_rows=0, validation=1, validation_performed=1
+Times     : P90_e2e_ms=0.472, P90_comp_ms=0.407, P90_comm_ms=0.065
+Perf      : GFLOPS_e2e=4.448, GBps_e2e=45.324, GFLOPS_comp=5.155, GBps_comp=52.534
+Comm/Iter : Per-rank max (KiB): total=390.609
+Memory    : Per-rank max (MiB): total=7.915
+Validation: rel_L2_error=1.312e-03, max_abs_error=1.319e+01
+=================================================================
+
+=================================================================
+Run at 2026-02-05 13:09:26
+Matrix    : matrices/./irreg_50k.mtx (50000 x 50000, nnz(header) = 1050000, nnz(used) = 1049999)
+Config    : ranks=2, threads=4, schedule=dynamic(chunk=64), warmup=2, repeats=2, trials=1, sort_rows=0, validation=1, validation_performed=1
+Times     : P90_e2e_ms=0.513, P90_comp_ms=0.445, P90_comm_ms=0.068
+Perf      : GFLOPS_e2e=4.093, GBps_e2e=41.706, GFLOPS_comp=4.720, GBps_comp=48.099
+Comm/Iter : Per-rank max (KiB): total=390.609
+Memory    : Per-rank max (MiB): total=7.915
+Validation: rel_L2_error=1.312e-03, max_abs_error=1.319e+01
+=================================================================
+
+=================================================================
+Run at 2026-02-05 13:28:39
+Matrix    : matrices/./irreg_50k.mtx (50000 x 50000, nnz(header) = 1050000, nnz(used) = 1050000)
+Config    : ranks=2, threads=4, schedule=dynamic(chunk=64), warmup=2, repeats=2, trials=1, sort_rows=0, validation=1, validation_performed=1
+Times     : P90_e2e_ms=0.565, P90_comp_ms=0.497, P90_comm_ms=0.068
+Perf      : GFLOPS_e2e=3.717, GBps_e2e=37.875, GFLOPS_comp=4.223, GBps_comp=43.032
+Comm/Iter : Per-rank max (KiB): total=390.609
+Memory    : Per-rank max (MiB): total=7.915
+Validation: rel_L2_error=0.000e+00, max_abs_error=0.000e+00
+=================================================================
+

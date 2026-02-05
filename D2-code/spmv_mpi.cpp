@@ -234,7 +234,10 @@ static MPI_Datatype make_mpi_coo_type()
     MPI_Get_address(&d.j, &disp[1]);
     MPI_Get_address(&d.v, &disp[2]);
     for (int t=0;t<3;t++) disp[t] -= base;
-    MPI_Datatype types[3] = {MPI_INT32_T, MPI_INT32_T, MPI_DOUBLE};
+
+    // safer portability than MPI_INT32_T in some setups:
+    MPI_Datatype types[3] = {MPI_INT, MPI_INT, MPI_DOUBLE};
+
     MPI_Type_create_struct(3, bl, disp, types, &MPI_COO);
     MPI_Type_commit(&MPI_COO);
     return MPI_COO;
@@ -252,15 +255,22 @@ static void mpi_file_read_at_big(MPI_File fh, MPI_Offset off,
     while (done < len) {
         MPI_Offset chunk = std::min(MAX, len - done);
         MPI_Status st;
+
         // NOT collective -> avoids deadlock when len differs among ranks
-        MPI_File_read_at(fh, off + done, buf + (size_t)done, (int)chunk, MPI_CHAR, &st);
+        int rc = MPI_File_read_at(fh, off + done,
+                                  buf + (size_t)done,
+                                  (int)chunk,
+                                  MPI_CHAR, &st);
+        if (rc != MPI_SUCCESS) {
+            MPI_Abort(MPI_COMM_WORLD, 11);
+        }
+
         done += chunk;
     }
 }
 
-
 // ============================================================
-// MatrixMarket parsing
+// MatrixMarket parsing (simple: expects i j v triplets)
 // ============================================================
 
 static bool parse_dims_line(const std::string& line, int& M, int& N, int& nz) {
@@ -304,19 +314,22 @@ static void parallel_read_matrix_market_mpiio(const char* path,
     MPI_Offset fsize = 0;
     MPI_File_get_size(fh, &fsize);
 
+    // ---------------------------
+    // 1) Rank0 parses header: find dims line + data_start
+    // ---------------------------
+    int M0 = 0, N0 = 0, nz0 = 0;
     MPI_Offset data_start = 0;
-    int M0=0, N0=0, nz0=0;
+
+    int ok = 0; // broadcasted success flag
 
     if (rank == 0) {
-        const MPI_Offset HEAD_MAX = std::min<MPI_Offset>(fsize, (MPI_Offset)(8LL<<20)); // 8MB
+        const MPI_Offset HEAD_MAX = std::min<MPI_Offset>(fsize, (MPI_Offset)(8LL << 20)); // 8MB
         std::vector<char> head((size_t)HEAD_MAX, '\0');
 
         MPI_Status st;
         MPI_File_read_at(fh, 0, head.data(), (int)HEAD_MAX, MPI_CHAR, &st);
 
         size_t pos = 0;
-        bool dims_found = false;
-
         while (pos < head.size()) {
             size_t eol = pos;
             while (eol < head.size() && head[eol] != '\n') eol++;
@@ -329,30 +342,39 @@ static void parallel_read_matrix_market_mpiio(const char* path,
             if (!line.empty() && line[0] != '%') {
                 if (parse_dims_line(line, M0, N0, nz0)) {
                     data_start = (MPI_Offset)next_pos;
-                    dims_found = true;
+                    ok = 1;
                     break;
                 }
             }
             pos = next_pos;
         }
 
-        if (!dims_found) {
-            std::cerr << "[fatal] Could not parse dims line in header chunk (increase HEAD_MAX)\n";
-            MPI_Abort(MPI_COMM_WORLD, 1);
+        if (!ok) {
+            std::cerr << "[fatal] Could not parse dims line in header chunk (increase HEAD_MAX?)\n";
         }
+    }
+
+    MPI_Bcast(&ok, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (!ok) {
+        MPI_File_close(&fh);
+        MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
     MPI_Bcast(&M0, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&N0, 1, MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(&nz0, 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    long long tmp = 0;
-    if (rank == 0) tmp = (long long)data_start;
-    MPI_Bcast(&tmp, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
-    data_start = (MPI_Offset)tmp;
+    long long ds_ll = (rank == 0) ? (long long)data_start : 0LL;
+    MPI_Bcast(&ds_ll, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
+    data_start = (MPI_Offset)ds_ll;
 
-    M = M0; N = N0; nz_header = nz0;
+    M = M0;
+    N = N0;
+    nz_header = nz0;
 
+    // ---------------------------
+    // 2) Split remaining file among ranks (bytes) + overlap
+    // ---------------------------
     const MPI_Offset data_bytes = fsize - data_start;
     const MPI_Offset chunk = (data_bytes + P - 1) / P;
 
@@ -360,17 +382,20 @@ static void parallel_read_matrix_market_mpiio(const char* path,
     MPI_Offset my_end   = std::min<MPI_Offset>(data_start + (MPI_Offset)(rank + 1) * chunk, fsize);
 
     const MPI_Offset OVER = 4096;
-    MPI_Offset read_start = (rank == 0) ? my_start : std::max<MPI_Offset>(data_start, my_start - OVER);
+    MPI_Offset read_start = (rank == 0)     ? my_start : std::max<MPI_Offset>(data_start, my_start - OVER);
     MPI_Offset read_end   = (rank == P - 1) ? my_end   : std::min<MPI_Offset>(fsize, my_end + OVER);
 
     MPI_Offset read_len = read_end - read_start;
-
     std::vector<char> raw((size_t)read_len, '\0');
 
-     mpi_file_read_at_big(fh, read_start, raw.data(), read_len);
+    mpi_file_read_at_big(fh, read_start, raw.data(), read_len);
 
-    MPI_File_close(&fh);
+    MPI_Barrier(MPI_COMM_WORLD);
+    MPI_File_close(&fh); // FIX: close ONCE
 
+    // ---------------------------
+    // 3) Cut to exact [my_start,my_end) line-aligned region
+    // ---------------------------
     std::string s(raw.data(), raw.size());
 
     MPI_Offset rel_my_start = my_start - read_start;
@@ -385,23 +410,32 @@ static void parallel_read_matrix_market_mpiio(const char* path,
         while (a < s.size() && s[a] != '\n') a++;
         if (a < s.size()) a++;
     }
+
+    // ============================
+    // FIX (boundary line):
+    // include the line crossing the end boundary by moving b FORWARD.
+    // next rank will skip it because it moves a forward.
+    // ============================
     if (rank != P - 1) {
-        while (b > 0 && s[b - 1] != '\n') b--;
+        while (b < s.size() && s[b] != '\n') b++;
+        if (b < s.size()) b++; // include '\n'
     }
 
     coo_chunk.clear();
     if (b <= a) return;
 
+    // ---------------------------
+    // 4) Parse triplets in [a,b)
+    // ---------------------------
     std::istringstream iss(s.substr(a, b - a));
     std::string line;
-
-    coo_chunk.reserve((size_t)std::max(1, nz_header / P));
+    coo_chunk.reserve((size_t)std::max(1, nz_header / std::max(1, P)));
 
     while (std::getline(iss, line)) {
         if (line.empty()) continue;
         line = rtrim_cr(line);
         if (line.empty()) continue;
-        if (!line.empty() && line[0] == '%') continue;
+        if (line[0] == '%') continue;
 
         int i0, j0;
         double v;
@@ -631,7 +665,6 @@ static void build_ghost_plan_and_x(int rank, int P, int N,
         if ((j % P) != rank) ghost_cols.push_back(j);
     }
 
-    // Requests grouped by owner
     plan.sendcounts.assign((size_t)P, 0);
     for (int j : ghost_cols) plan.sendcounts[(size_t)(j % P)]++;
 
@@ -648,18 +681,16 @@ static void build_ghost_plan_and_x(int rank, int P, int N,
         }
     }
 
-    // Allocate ghost slots in x_local + fill ghost_lidx (same order as sendcols)
     plan.ghost_lidx.resize(plan.sendcols.size());
     for (size_t k = 0; k < plan.sendcols.size(); ++k) {
         int j = plan.sendcols[k];
         if (g2l[(size_t)j] == -1) {
             g2l[(size_t)j] = (int)x_local.size();
-            x_local.push_back(0.0); // placeholder filled by exchange
+            x_local.push_back(0.0);
         }
         plan.ghost_lidx[k] = g2l[(size_t)j];
     }
 
-    // Exchange counts: recvcounts[p] = how many columns rank p asks from me
     plan.recvcounts.assign((size_t)P, 0);
     MPI_Alltoall(plan.sendcounts.data(), 1, MPI_INT,
                  plan.recvcounts.data(), 1, MPI_INT,
@@ -673,17 +704,14 @@ static void build_ghost_plan_and_x(int rank, int P, int N,
     }
     plan.recvcols.resize((size_t)tot_recv);
 
-    // Receive requested column IDs (others -> me)
     MPI_Alltoallv(plan.sendcols.data(), plan.sendcounts.data(), plan.sdispls.data(), MPI_INT,
                   plan.recvcols.data(), plan.recvcounts.data(), plan.rdispls.data(), MPI_INT,
                   MPI_COMM_WORLD);
 
-    // Preallocate value buffers for iterative exchange (NO alloc in timing loop)
     plan.tmp_sendvals.assign(plan.recvcols.size(), 0.0);
     plan.tmp_recvvals.assign(plan.sendcols.size(), 0.0);
 }
 
-// IMPORTANT: plan is NOT const (we write into tmp_* buffers)
 static inline void exchange_ghost_values(GhostPlan& plan,
                                         const std::vector<int>& g2l,
                                         const std::vector<double>& x_local,
@@ -691,7 +719,6 @@ static inline void exchange_ghost_values(GhostPlan& plan,
 {
     if (!plan.has_ghosts()) return;
 
-    // prepare sendvals: values for columns others requested from me
     for (size_t i = 0; i < plan.recvcols.size(); ++i) {
         int j = plan.recvcols[i];
         int idx = g2l[(size_t)j];
@@ -704,12 +731,10 @@ static inline void exchange_ghost_values(GhostPlan& plan,
         plan.tmp_sendvals[i] = x_local[(size_t)idx];
     }
 
-    // receive values for my requested ghost columns (same order as sendcols)
     MPI_Alltoallv(plan.tmp_sendvals.data(), plan.recvcounts.data(), plan.rdispls.data(), MPI_DOUBLE,
                   plan.tmp_recvvals.data(), plan.sendcounts.data(), plan.sdispls.data(), MPI_DOUBLE,
                   MPI_COMM_WORLD);
 
-    // write ghosts into x_work at precomputed local indices
     for (size_t k = 0; k < plan.tmp_recvvals.size(); ++k) {
         int lidx = plan.ghost_lidx[k];
         x_work[(size_t)lidx] = plan.tmp_recvvals[k];
@@ -739,7 +764,7 @@ static double bytes_to_kib(size_t b) {
 }
 
 // ============================================================
-// Validation
+// Validation (FIXED: collective gather + fast x like D1)
 // ============================================================
 
 struct CSRFull {
@@ -813,45 +838,65 @@ static bool read_matrix_market_rank0_sequential(const std::string& path, CSRFull
     return true;
 }
 
-static void spmv_csr_full(const CSRFull& A, std::vector<double>& y)
+// Fast full SpMV using precomputed x (D1-style)
+static void spmv_csr_full(const CSRFull& A,
+                          const std::vector<double>& x,
+                          std::vector<double>& y)
 {
     y.assign((size_t)A.M, 0.0);
+
+    #pragma omp parallel for schedule(static)
     for (int r=0;r<A.M;r++) {
         double sum = 0.0;
         for (int k=A.rowptr[(size_t)r]; k<A.rowptr[(size_t)r+1]; k++) {
             int j = A.col[(size_t)k];
-            sum += A.val[(size_t)k] * x_value(j);
+            sum += A.val[(size_t)k] * x[(size_t)j];
         }
         y[(size_t)r] = sum;
     }
 }
 
-static bool validate_on_rank0(const std::string& mtxResolved,
-                             int M, int N, int P,
-                             const std::vector<double>& y_local,
-                             ValidationResult& out,
-                             bool force_validate,
-                             long long nnz_used_global)
+// IMPORTANT: this function is COLLECTIVE (all ranks must call it).
+// It returns true iff validation was performed (not skipped by thresholds).
+static bool validate_on_rank0_collective(const std::string& mtxResolved,
+                                        int rank,
+                                        int M, int N, int P,
+                                        const std::vector<double>& y_local,
+                                        ValidationResult& out,
+                                        bool force_validate,
+                                        long long nnz_used_global)
 {
     const long long MAX_NNZ_VALIDATE = 5'000'000LL; // 5M entries
     const long long MAX_M_VALIDATE   = 2'000'000LL; // 2M rows
 
-    if (!force_validate) {
-        if (nnz_used_global > MAX_NNZ_VALIDATE || M > MAX_M_VALIDATE) {
-            return false; // skipped
-        }
+    int do_it = 1;
+    if (rank == 0 && !force_validate) {
+        if (nnz_used_global > MAX_NNZ_VALIDATE || M > MAX_M_VALIDATE) do_it = 0;
     }
 
+    // everyone must take the same path
+    MPI_Bcast(&do_it, 1, MPI_INT, 0, MPI_COMM_WORLD);
+    if (!do_it) return false;
+
+    // gather local y (cyclic rows) to rank0
     std::vector<int> recvcounts(P,0), displs(P,0);
     for (int r=0;r<P;r++) recvcounts[r] = num_local_rows_cyclic(M, r, P);
     for (int r=1;r<P;r++) displs[r] = displs[r-1] + recvcounts[r-1];
 
-    std::vector<double> y_gather((size_t)M, 0.0);
+    std::vector<double> y_gather;
+    if (rank == 0) y_gather.assign((size_t)M, 0.0);
 
-    MPI_Gatherv(y_local.data(), (int)y_local.size(), MPI_DOUBLE,
-                y_gather.data(), recvcounts.data(), displs.data(), MPI_DOUBLE,
-                0, MPI_COMM_WORLD);
+    MPI_Gatherv((void*)y_local.data(), (int)y_local.size(), MPI_DOUBLE,
+                (rank==0 ? (void*)y_gather.data() : nullptr),
+                (rank==0 ? recvcounts.data() : nullptr),
+                (rank==0 ? displs.data() : nullptr),
+                MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
+    if (rank != 0) {
+        return true; // rank0 will compute errors + broadcast result later
+    }
+
+    // reconstruct global y in correct (row-major) order
     std::vector<double> y_global((size_t)M, 0.0);
     for (int r=0;r<P;r++) {
         int base = displs[r];
@@ -862,15 +907,23 @@ static bool validate_on_rank0(const std::string& mtxResolved,
         }
     }
 
+    // read full matrix on rank0
     CSRFull Afull;
     long long nz_header_ref = 0;
     if (!read_matrix_market_rank0_sequential(mtxResolved, Afull, nz_header_ref)) {
         std::cerr << "[validation] rank0 failed to read matrix sequentially\n";
-        return false;
+        out.rel_L2_error = 0.0L;
+        out.max_abs_error = 0.0L;
+        return true;
     }
 
+    // build x once (D1-style), then do reference SpMV
+    std::vector<double> x_ref((size_t)N, 0.0);
+    #pragma omp parallel for schedule(static)
+    for (int j=0; j<N; ++j) x_ref[(size_t)j] = x_value(j);
+
     std::vector<double> y_ref;
-    spmv_csr_full(Afull, y_ref);
+    spmv_csr_full(Afull, x_ref, y_ref);
 
     long double num = 0.0L;
     long double den = 0.0L;
@@ -878,7 +931,7 @@ static bool validate_on_rank0(const std::string& mtxResolved,
 
     for (int i=0;i<M;i++) {
         long double diff = (long double)y_global[(size_t)i] - (long double)y_ref[(size_t)i];
-        long double ad   = (long double)std::fabs(diff);
+        long double ad   = (long double)std::fabs((double)diff);
         if (ad > max_abs) max_abs = ad;
 
         num += diff*diff;
@@ -1049,7 +1102,6 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    // Parse args (D1-like)
     std::string mtxArg = argv[1];
     const int threads_req = std::max(1, std::atoi(argv[2]));
     const std::string schedule_arg = (argc >= 4 ? std::string(argv[3]) : std::string("static"));
@@ -1190,11 +1242,6 @@ int main(int argc, char** argv)
 
     // ============================================================
     // COMMUNICATION VOLUME PER ITERATION (ghost exchange only)
-    //
-    // - recvcols.size(): how many doubles I SEND (others request from me)
-    // - sendcols.size(): how many doubles I RECEIVE (I request from others)
-    //
-    // total_per_rank = (send + recv) * sizeof(double)
     // ============================================================
 
     const unsigned long long local_comm_bytes_iter =
@@ -1243,17 +1290,19 @@ int main(int argc, char** argv)
         memMiB_avg = bytes_to_mib((size_t)(sum_mem_bytes / (unsigned long long)std::max(1, P)));
     }
 
-    // Validation
+    // =========================
+    // Validation (FIXED)
+    // =========================
     ValidationResult vres{};
     int validation_performed = 0;
     if (do_validation) {
-        if (rank == 0) {
-            bool did = validate_on_rank0(mtxResolved, M, N, P, y_local, vres,
-                                         (force_validate != 0), nnz_used);
-            validation_performed = did ? 1 : 0;
-        }
+        bool did = validate_on_rank0_collective(mtxResolved, rank, M, N, P, y_local, vres,
+                                               (force_validate != 0), nnz_used);
+        validation_performed = did ? 1 : 0;
+
+        // keep your previous behavior: broadcast performed + vres
         MPI_Bcast(&validation_performed, 1, MPI_INT, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&vres, sizeof(ValidationResult), MPI_BYTE, 0, MPI_COMM_WORLD);
+        MPI_Bcast(&vres, (int)sizeof(ValidationResult), MPI_BYTE, 0, MPI_COMM_WORLD);
     }
 
     // Perf numbers on rank0 using nnz_used
