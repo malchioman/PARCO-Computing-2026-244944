@@ -17,7 +17,7 @@ module load cmake-3.15.4
 mkdir -p logs results
 chmod +x script/strong.sh
 
-# Esempio: matrice reale (solo nome, verrà risolta con MATRICES_DIR)
+#real matrix
 MATRIX="${MATRIX:-kron_g500-logn21.mtx}"
 
 ./script/strong.sh "$MATRIX" 1 static 64 10 5

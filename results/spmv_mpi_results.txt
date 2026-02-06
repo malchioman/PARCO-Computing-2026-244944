@@ -44,3 +44,14 @@ Memory    : Per-rank max (MiB): total=7.915
 Validation: rel_L2_error=0.000e+00, max_abs_error=0.000e+00
 =================================================================
 
+=================================================================
+Run at 2026-02-06 15:54:55
+Matrix    : matrices/./irreg_50k.mtx (50000 x 50000, nnz(header) = 1050000, nnz(used) = 1050000)
+Config    : ranks=2, threads=8, schedule=dynamic(chunk=64), warmup=2, repeats=10, trials=5, sort_rows=0, validation=1, validation_performed=1
+Times     : P90_e2e_ms=0.562, P90_comp_ms=0.498, P90_comm_ms=0.072
+Perf      : GFLOPS_e2e=3.734, GBps_e2e=38.047, GFLOPS_comp=4.218, GBps_comp=42.984
+Comm/Iter : Per-rank max (KiB): total=390.609
+Memory    : Per-rank max (MiB): total=7.915
+Validation: rel_L2_error=0.000e+00, max_abs_error=0.000e+00
+=================================================================
+
