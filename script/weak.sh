@@ -76,6 +76,10 @@ for P in "${P_LIST[@]}"; do
     echo "$OUTRUN" |
     awk '/Per-rank max \(KiB\): total=/{for(i=1;i<=NF;i++) if($i ~ /^avg=/){sub(/^avg=/,"",$i); print $i; exit}}'
   )
+  memMiB_max=$(
+    echo "$OUTRUN" |
+    awk '/Per-rank max \(MiB\): total=/{for(i=1;i<=NF;i++) if($i ~ /^total=/){sub(/^total=/,"",$i); print $i; exit}}'
+  )
 
 
   printf "%-6d %-10d %-10d %-12d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-14.3f\n" \

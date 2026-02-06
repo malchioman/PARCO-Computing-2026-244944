@@ -54,6 +54,16 @@ for P in "${P_LIST[@]}"; do
   gflops_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only GFLOPS/{print $2}' | awk '{print $1}' | tail -n1)
   gbps_comp=$(echo "$OUTRUN" | awk -F': ' '/Compute-only BW/{print $2}' | awk '{print $1}' | tail -n1)
 
+  commKiB_max=$(
+    echo "$OUTRUN" |
+    awk '/Per-rank max \(KiB\): total=/{for(i=1;i<=NF;i++) if($i ~ /^total=/){sub(/^total=/,"",$i); print $i; exit}}'
+  )
+  memMiB_max=$(
+    echo "$OUTRUN" |
+    awk '/Per-rank max \(MiB\): total=/{for(i=1;i<=NF;i++) if($i ~ /^total=/){sub(/^total=/,"",$i); print $i; exit}}'
+  )
+
+
   printf "%-4d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-14.3f %-14.3f\n" \
     "$P" "${p90_e2e:-0}" "${p90_comp:-0}" "${p90_comm:-0}" \
     "${gflops_e2e:-0}" "${gbps_e2e:-0}" "${gflops_comp:-0}" "${gbps_comp:-0}" >> "$OUT"
