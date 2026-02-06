@@ -1,0 +1,69 @@
+#!/bin/bash
+#PBS -N spmv_mpi
+#PBS -j oe
+
+set -euo pipefail
+
+# ROOT viene passato dal submit; fallback: assume che PBS_O_WORKDIR sia repo root
+ROOT="${ROOT:-$PBS_O_WORKDIR}"
+
+cd "$ROOT"
+mkdir -p "$ROOT/logs"
+exec > "$ROOT/logs/spmv_${PBS_JOBID}.log" 2>&1
+
+module purge
+module load gcc91
+module load openmpi-3.0.0--gcc-9.1.0
+
+EXE="${EXE:-$ROOT/bin/spmv_mpi}"
+if [[ ! -x "$EXE" ]]; then
+  echo "[fatal] eseguibile non trovato o non eseguibile: $EXE"
+  exit 1
+fi
+
+export MATRICES_DIR="${MATRICES_DIR:-$ROOT/bin/matrices}"
+
+# Prendo args dal main tramite ARGS (compatibile ovunque)
+if [[ $# -eq 0 && -n "${ARGS:-}" ]]; then
+  # shellcheck disable=SC2086
+  set -- $ARGS
+fi
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: <matrix.mtx> <threads> [static|dynamic|guided|auto] [chunk] [repeats] [trials] [flags...]"
+  exit 2
+fi
+
+THREADS="$2"
+export OMP_NUM_THREADS="$THREADS"
+export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
+export OMP_PLACES="${OMP_PLACES:-cores}"
+
+NP="${NP:-${PBS_NP:-1}}"
+PPN="${PPN:-8}"
+
+RPN=$(( PPN / OMP_NUM_THREADS ))
+if [[ "$RPN" -lt 1 ]]; then RPN=1; fi
+
+echo "============================================================"
+echo "ROOT         : $ROOT"
+echo "EXE          : $EXE"
+echo "MATRICES_DIR : $MATRICES_DIR"
+echo "NP (ranks)   : $NP"
+echo "OMP threads  : $OMP_NUM_THREADS"
+echo "PPN          : $PPN"
+echo "RPN          : $RPN"
+echo "ARGS(main)   : $*"
+echo "============================================================"
+
+HOSTFILE="${PBS_NODEFILE:-}"
+
+if [[ -n "$HOSTFILE" && -f "$HOSTFILE" ]]; then
+  mpirun -np "$NP" --hostfile "$HOSTFILE" \
+    --bind-to core --map-by "ppr:${RPN}:node:PE=${OMP_NUM_THREADS}" \
+    "$EXE" "$@"
+else
+  mpirun -np "$NP" \
+    --bind-to core --map-by "ppr:${RPN}:node:PE=${OMP_NUM_THREADS}" \
+    "$EXE" "$@"
+fi
