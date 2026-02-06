@@ -36,13 +36,13 @@ int main(int argc, char** argv) {
   const fs::path final_mtx = dest / (matrix + ".mtx");
   const fs::path archive   = dest / (matrix + ".tar.gz");
 
-  // Se esiste già il .mtx finale, fine.
+  // check if the matrix alredy exist
   if (exists_nonempty(final_mtx)) {
     std::cout << "[fetch] already have " << final_mtx.string() << "\n";
     return 0;
   }
 
-  // L’unico URL che ti funziona (HTTP)
+  // HTTP url
   const std::string url =
     "http://sparse-files.engr.tamu.edu/MM/DIMACS10/kron_g500-logn21.tar.gz";
 
