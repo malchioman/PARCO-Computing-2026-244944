@@ -31,9 +31,10 @@ P_LIST=(1 2 4 8 16 32 64 128)
   echo "repeats: $REPEATS trials: $TRIALS"
   echo "P list: ${P_LIST[*]}"
   echo
-  printf "%-4s %-12s %-14s %-12s %-12s %-12s %-14s %-14s\n" \
+  printf "%-4s %-12s %-14s %-12s %-12s %-12s %-14s %-14s %-12s %-12s\n" \
     "P" "p90_e2e_ms" "p90_comp_ms" "p90_comm_ms" \
-    "gflops_e2e" "gbps_e2e" "gflops_comp" "gbps_comp"
+    "gflops_e2e" "gbps_e2e" "gflops_comp" "gbps_comp" \
+    "commKiB_max" "memMiB_max"
 } > "$OUT"
 
 for P in "${P_LIST[@]}"; do
@@ -64,9 +65,11 @@ for P in "${P_LIST[@]}"; do
   )
 
 
-  printf "%-4d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-14.3f %-14.3f\n" \
+  printf "%-4d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-14.3f %-14.3f %-12.3f %-12.3f\n" \
     "$P" "${p90_e2e:-0}" "${p90_comp:-0}" "${p90_comm:-0}" \
-    "${gflops_e2e:-0}" "${gbps_e2e:-0}" "${gflops_comp:-0}" "${gbps_comp:-0}" >> "$OUT"
+    "${gflops_e2e:-0}" "${gbps_e2e:-0}" "${gflops_comp:-0}" "${gbps_comp:-0}" \
+    "${commKiB_max:-0}" "${memMiB_max:-0}" >> "$OUT"
+
 done
 
 echo "[done] wrote $OUT" >&2

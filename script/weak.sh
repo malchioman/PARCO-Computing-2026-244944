@@ -36,10 +36,10 @@ P_LIST=(1 2 4 8 16 32 64 128)
   echo "nnz_per_rank:  $NNZ_PER_RANK"
   echo "P list: ${P_LIST[*]}"
   echo
-  printf "%-6s %-10s %-10s %-12s %-12s %-14s %-12s %-12s %-12s %-14s\n" \
+  printf "%-6s %-10s %-10s %-12s %-12s %-14s %-12s %-12s %-12s %-14s %-12s\n" \
     "P" "rows" "cols" "nnz" \
     "p90_e2e_ms" "p90_comp_ms" "p90_comm_ms" \
-    "gflops_e2e" "gflops_comp" "commKiB_max"
+    "gflops_e2e" "gflops_comp" "commKiB_max" "memMiB_max"
 } > "$OUT"
 
 for P in "${P_LIST[@]}"; do
@@ -82,10 +82,11 @@ for P in "${P_LIST[@]}"; do
   )
 
 
-  printf "%-6d %-10d %-10d %-12d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-14.3f\n" \
+  printf "%-6d %-10d %-10d %-12d %-12.3f %-14.3f %-12.3f %-12.3f %-12.3f %-14.3f %-12.3f\n" \
     "$P" "$rows" "$cols" "$nnz" \
-    "$p90_e2e" "$p90_comp" "$p90_comm" \
-    "$gflops_e2e" "$gflops_comp" "${commKiB_max:-0}" >> "$OUT"
+    "${p90_e2e:-0}" "${p90_comp:-0}" "${p90_comm:-0}" \
+    "${gflops_e2e:-0}" "${gflops_comp:-0}" "${commKiB_max:-0}" "${memMiB_max:-0}" >> "$OUT"
+
 done
 
 echo "[done] wrote $OUT" >&2
