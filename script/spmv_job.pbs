@@ -4,12 +4,25 @@
 
 set -euo pipefail
 
-# ROOT viene passato dal submit; fallback: assume che PBS_O_WORKDIR sia repo root
+# ROOT passato dal submit; fallback: assume PBS_O_WORKDIR come root repo
 ROOT="${ROOT:-$PBS_O_WORKDIR}"
 
 cd "$ROOT"
 mkdir -p "$ROOT/logs"
-exec > "$ROOT/logs/spmv_${PBS_JOBID}.log" 2>&1
+
+# Log per-job (così sai sempre dove guardare)
+LOGFILE="$ROOT/logs/spmv_${PBS_JOBID}.log"
+
+# Stampa su log (che poi viene tailato dal submit)
+exec >"$LOGFILE" 2>&1
+
+echo "============================================================"
+echo "JOB START"
+echo "JOBID   : ${PBS_JOBID:-N/A}"
+echo "ROOT    : $ROOT"
+echo "DATE    : $(date)"
+echo "HOST    : $(hostname)"
+echo "============================================================"
 
 module purge
 module load gcc91
@@ -23,7 +36,7 @@ fi
 
 export MATRICES_DIR="${MATRICES_DIR:-$ROOT/bin/matrices}"
 
-# Prendo args dal main tramite ARGS (compatibile ovunque)
+# Argomenti al main passati via ARGS dal submit
 if [[ $# -eq 0 && -n "${ARGS:-}" ]]; then
   # shellcheck disable=SC2086
   set -- $ARGS
@@ -43,27 +56,41 @@ NP="${NP:-${PBS_NP:-1}}"
 PPN="${PPN:-8}"
 
 RPN=$(( PPN / OMP_NUM_THREADS ))
-if [[ "$RPN" -lt 1 ]]; then RPN=1; fi
+if [[ "$RPN" -lt 1 ]]; then
+  echo "[fatal] threads ($OMP_NUM_THREADS) > ppn ($PPN): non mappabile senza oversubscribe"
+  exit 3
+fi
 
-echo "============================================================"
-echo "ROOT         : $ROOT"
-echo "EXE          : $EXE"
-echo "MATRICES_DIR : $MATRICES_DIR"
-echo "NP (ranks)   : $NP"
-echo "OMP threads  : $OMP_NUM_THREADS"
-echo "PPN          : $PPN"
-echo "RPN          : $RPN"
-echo "ARGS(main)   : $*"
-echo "============================================================"
+echo "CONFIG"
+echo "  EXE          : $EXE"
+echo "  MATRICES_DIR : $MATRICES_DIR"
+echo "  NP (ranks)   : $NP"
+echo "  OMP threads  : $OMP_NUM_THREADS"
+echo "  PPN          : $PPN"
+echo "  Ranks/node   : $RPN"
+echo "  ARGS(main)   : $*"
+echo "------------------------------------------------------------"
 
 HOSTFILE="${PBS_NODEFILE:-}"
 
+# Line-buffering per vedere output “live” nel tail (se stdbuf disponibile)
+STDBUF=""
+if command -v stdbuf >/dev/null 2>&1; then
+  STDBUF="stdbuf -oL -eL"
+fi
+
 if [[ -n "$HOSTFILE" && -f "$HOSTFILE" ]]; then
-  mpirun -np "$NP" --hostfile "$HOSTFILE" \
+  $STDBUF mpirun -np "$NP" --hostfile "$HOSTFILE" \
     --bind-to core --map-by "ppr:${RPN}:node:PE=${OMP_NUM_THREADS}" \
     "$EXE" "$@"
 else
-  mpirun -np "$NP" \
+  $STDBUF mpirun -np "$NP" \
     --bind-to core --map-by "ppr:${RPN}:node:PE=${OMP_NUM_THREADS}" \
     "$EXE" "$@"
 fi
+
+echo "============================================================"
+echo "JOB END"
+echo "DATE: $(date)"
+echo "LOG : $LOGFILE"
+echo "============================================================"

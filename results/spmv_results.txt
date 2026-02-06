@@ -32,3 +32,43 @@ Validation: rel_L2_error=0.000000e+00, max_abs_error=0.000000e+00
 Results   : p90_ms=0.686, GFLOPS=1.311, GBps=8.742
 =================================================================
 
+=================================================================
+Run at 2026-02-06 16:08:28
+Matrix    : matrices/irreg_50k.mtx (50000 x 50000, nnz = 1050000)
+Config    : threads=4, schedule=static(chunk=8), warmup=2, repeats=5, trials=10
+Validation: rel_L2_error=0.000000e+00, max_abs_error=0.000000e+00
+Results   : p90_ms=0.445, GFLOPS=4.722, GBps=28.781
+=================================================================
+
+=================================================================
+Run at 2026-02-06 17:56:32
+Matrix    : /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/script/../bin/matrices/irreg_50k.mtx (50000 x 50000, nnz = 1050000)
+Config    : threads=20, schedule=dynamic(chunk=32), warmup=2, repeats=10, trials=5
+Validation: rel_L2_error=0.000000e+00, max_abs_error=0.000000e+00
+Results   : p90_ms=1.241, GFLOPS=1.692, GBps=10.310
+=================================================================
+
+=================================================================
+Run at 2026-02-06 18:20:58
+Matrix    : /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/script/../bin/matrices/reg_150k.mtx (150000 x 150000, nnz = 449998)
+Config    : threads=20, schedule=static(chunk=64), warmup=2, repeats=10, trials=5
+Validation: rel_L2_error=0.000000e+00, max_abs_error=0.000000e+00
+Results   : p90_ms=0.599, GFLOPS=1.503, GBps=10.018
+=================================================================
+
+=================================================================
+Run at 2026-02-06 18:22:07
+Matrix    : /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/script/../bin/matrices/irreg_50k.mtx (50000 x 50000, nnz = 1050000)
+Config    : threads=1, schedule=dynamic(chunk=32), warmup=2, repeats=10, trials=5
+Validation: rel_L2_error=0.000000e+00, max_abs_error=0.000000e+00
+Results   : p90_ms=1.004, GFLOPS=2.092, GBps=12.752
+=================================================================
+
+=================================================================
+Run at 2026-02-06 18:22:33
+Matrix    : /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/script/../bin/matrices/reg_150k.mtx (150000 x 150000, nnz = 449998)
+Config    : threads=1, schedule=static(chunk=64), warmup=2, repeats=10, trials=5
+Validation: rel_L2_error=0.000000e+00, max_abs_error=0.000000e+00
+Results   : p90_ms=0.630, GFLOPS=1.428, GBps=9.522
+=================================================================
+
