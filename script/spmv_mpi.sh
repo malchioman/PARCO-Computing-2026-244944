@@ -2,7 +2,7 @@
 set -euo pipefail
 
 command -v qsub >/dev/null 2>&1 || {
-  echo "[fatal] qsub not found: esegui questo script sul CLUSTER (login node), non in locale/WSL."
+  echo "[fatal] qsub not found: Run this script on the CLUSTER (login node), not on local/WSL."
   exit 127
 }
 
@@ -23,13 +23,13 @@ PBS_SCRIPT="$SCRIPT_DIR/spmv_mpi.pbs"
 MATRICES_DIR="$REPO_ROOT/bin/matrices"
 MATRIX="$(basename "$MATRIX_IN")"
 
-# matrice SOLO in bin/matrices
+# matrix only in bin/matrices
 if [[ ! -f "$MATRICES_DIR/$MATRIX" ]]; then
   echo "[fatal] matrix not found: $MATRIX (expected in $MATRICES_DIR)"
   exit 3
 fi
 
-# risorse (come strong: nodi da 72 core)
+# resources
 NCPUS_NODE="${NCPUS_NODE:-72}"
 QUEUE="${QUEUE:-short_cpuQ}"
 WALLTIME="${WALLTIME:-01:00:00}"
@@ -46,13 +46,13 @@ if (( RPN < 1 )); then RPN=1; fi
 NODES=$(( (NP + RPN - 1) / RPN ))
 NCPUS_CHUNK=$(( RPN * THREADS ))
 
-# MASTER file unico (corto)
+# MASTER unique file
 MASTER_OUT_REL="results/pbs_out/spmv_mpi.out"
 MASTER_OUT="$REPO_ROOT/$MASTER_OUT_REL"
 mkdir -p "$(dirname "$MASTER_OUT")"
 touch "$MASTER_OUT"
 
-# submit: PBS stdout/stderr buttati (gestiamo tutto noi nel master file)
+# submit: PBS stdout/stderr
 JOBID=$(qsub \
   -q "$QUEUE" \
   -l "select=${NODES}:ncpus=${NCPUS_CHUNK}:mpiprocs=${RPN}" \
@@ -62,7 +62,7 @@ JOBID=$(qsub \
   "$PBS_SCRIPT"
 )
 
-# append SUBITO: anche se resta in coda
+# append immediately: also if it is in a queue
 ts="$(date '+%Y-%m-%d %H:%M:%S')"
 line="[submitted] $ts job=$JOBID NP=$NP threads=$THREADS matrix=$MATRIX sched=$SCHED chunk=$CHUNK repeats=$REPEATS trials=$TRIALS"
 
@@ -73,5 +73,5 @@ else
   echo "$line" >> "$MASTER_OUT"
 fi
 
-# output bello in terminale
+# output in terminal
 echo "[submitted] $JOBID  ->  $MASTER_OUT_REL"

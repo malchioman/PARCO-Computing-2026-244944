@@ -1,1 +1,0 @@
-/usr/bin/mpic++ -O3 -DNDEBUG "CMakeFiles/spmv_csr.dir/D1-code/spmv_csr.cpp.o" -o /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/bin/spmv_csr  /mnt/c/Users/Massimo/Documents/GitHub/PARCO-Computing-2026-244944/bin/libmmio.a /usr/lib/gcc/x86_64-linux-gnu/13/libgomp.so /usr/lib/x86_64-linux-gnu/libpthread.a 
