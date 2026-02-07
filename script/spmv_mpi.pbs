@@ -18,10 +18,12 @@ module load openmpi-3.0.0--gcc-9.1.0
 export MATRICES_DIR="$REPO_ROOT/bin/matrices"
 mkdir -p results
 
+# File unico (passato dal submit; default)
 MASTER_OUT="${MASTER_OUT:-$REPO_ROOT/results/pbs_out/spmv_mpi.out}"
 mkdir -p "$(dirname "$MASTER_OUT")"
 touch "$MASTER_OUT"
 
+# Lock per append pulito anche con job concorrenti
 LOCKFILE="${MASTER_OUT}.lock"
 append_master() {
   if command -v flock >/dev/null 2>&1; then
@@ -30,6 +32,16 @@ append_master() {
     printf "%s\n" "$1" >> "$MASTER_OUT"
   fi
 }
+
+# --- scrivi subito quando il job parte davvero ---
+append_master "[started] $(date '+%Y-%m-%d %H:%M:%S') job=$PBS_JOBID host=$(hostname)"
+
+# se vieni terminato (walltime / qdel / ecc.)
+trap 'append_master "[killed] $(date "+%Y-%m-%d %H:%M:%S") job=$PBS_JOBID"; exit 143' TERM INT
+
+# cattura anche errori "early" (module load, cd, ecc.)
+set -E
+trap 'rc=$?; append_master "[error] $(date "+%Y-%m-%d %H:%M:%S") job=$PBS_JOBID early-failure rc=$rc"; exit $rc' ERR
 
 # ---- args dal submit ----
 NP="${NP:?missing NP}"
@@ -46,10 +58,6 @@ export OMP_NUM_THREADS="$THREADS"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
 export OMP_PLACES="${OMP_PLACES:-cores}"
 
-# STARTED + trap KILLED (walltime/kill)
-append_master "[started] $(date '+%Y-%m-%d %H:%M:%S') job=$PBS_JOBID host=$(hostname)"
-trap 'append_master "[killed] $(date "+%Y-%m-%d %H:%M:%S") job=$PBS_JOBID"; exit 143' TERM INT
-
 if [[ ! -x "$EXE" ]]; then
   append_master "[error] $(date '+%Y-%m-%d %H:%M:%S') job=$PBS_JOBID EXE not found: $EXE"
   exit 1
@@ -64,7 +72,7 @@ CMD=( mpirun -np "$NP" --hostfile "$PBS_NODEFILE"
       --bind-to core --map-by "ppr:${RPN}:node:PE=${THREADS}"
       "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" )
 
-# Esegui “quiet”: cattura output in temp, appende solo su errore
+# Catturo tutto in temp; se fail appendo un tail al file unico
 TMPLOG="${TMPDIR:-/tmp}/spmv_mpi_${PBS_JOBID}.log"
 
 set +e
@@ -81,6 +89,8 @@ if [[ $rc -eq 0 ]]; then
   exit 0
 else
   append_master "[error] $ts job=$PBS_JOBID exit=$rc NP=$NP threads=$THREADS matrix=$MATRIX (tail follows)"
+
+  # append tail (max 80 righe) in modo atomic-ish
   if command -v flock >/dev/null 2>&1; then
     {
       flock -w 30 9
@@ -91,5 +101,6 @@ else
     tail -n 80 "$TMPLOG" >> "$MASTER_OUT"
     printf "\n" >> "$MASTER_OUT"
   fi
+
   exit $rc
 fi
