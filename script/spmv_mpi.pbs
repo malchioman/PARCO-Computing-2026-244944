@@ -15,15 +15,13 @@ module purge
 module load gcc91
 module load openmpi-3.0.0--gcc-9.1.0
 
-mkdir -p logs results
-
-# Matrici: SOLO qui
+mkdir -p results
 export MATRICES_DIR="$REPO_ROOT/bin/matrices"
 
 # ---- args dal submit ----
 NP="${NP:?missing NP}"
 THREADS="${THREADS:?missing THREADS}"
-MATRIX="${MATRIX:?missing MATRIX}"   # deve essere solo basename: foo.mtx
+MATRIX="${MATRIX:?missing MATRIX}"   # basename, sta in bin/matrices
 SCHED="${SCHED:-static}"
 CHUNK="${CHUNK:-64}"
 REPEATS="${REPEATS:-10}"
@@ -40,28 +38,22 @@ if [[ ! -x "$EXE" ]]; then
   exit 1
 fi
 
-# Check matrice (così non sprechi tempo di compute)
 if [[ ! -f "$MATRICES_DIR/$MATRIX" ]]; then
   echo "[fatal] matrix not found in $MATRICES_DIR : $MATRIX"
   exit 2
 fi
 
-# Log dedicato dell'eseguibile (output + errori) -> NON sporca PBS out
-RUNLOG="$REPO_ROOT/logs/spmv_mpi_run_${PBS_JOBID}.log"
-
 CMD=( mpirun -np "$NP" --hostfile "$PBS_NODEFILE"
       --bind-to core --map-by "ppr:${RPN}:node:PE=${THREADS}"
       "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" )
 
-QUIET="${QUIET:-1}"
-if [[ "$QUIET" == "1" ]]; then
-  # shellcheck disable=SC2086
-  "${CMD[@]}" $FLAGS >"$RUNLOG" 2>&1 || {
-    rc=$?
-    echo "[job] spmv_mpi FAILED (exit=$rc). See: $RUNLOG"
-    exit $rc
-  }
+if "${CMD[@]}" $FLAGS >/dev/null 2>&1; then
+  echo "[ok] spmv_mpi completed successfully (NP=$NP, threads=$THREADS, matrix=$MATRIX). Results saved in results/spmv_mpi_results.txt and results/spmv_mpi_results.tsv"
+  exit 0
 else
-  # shellcheck disable=SC2086
+  rc=$?
+  echo "[error] spmv_mpi failed (exit=$rc). Rerunning verbosely to show the error:"
   "${CMD[@]}" $FLAGS
+  exit $rc
 fi
+
