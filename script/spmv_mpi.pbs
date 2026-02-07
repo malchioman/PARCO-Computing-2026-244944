@@ -18,11 +18,10 @@ module load openmpi-3.0.0--gcc-9.1.0
 export MATRICES_DIR="$REPO_ROOT/bin/matrices"
 mkdir -p results
 
-# File unico (passato dal submit; default)
 MASTER_OUT="${MASTER_OUT:-$REPO_ROOT/results/pbs_out/spmv_mpi.out}"
 mkdir -p "$(dirname "$MASTER_OUT")"
+touch "$MASTER_OUT"
 
-# Lock per append “pulito” anche con job concorrenti
 LOCKFILE="${MASTER_OUT}.lock"
 append_master() {
   if command -v flock >/dev/null 2>&1; then
@@ -47,13 +46,17 @@ export OMP_NUM_THREADS="$THREADS"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
 export OMP_PLACES="${OMP_PLACES:-cores}"
 
+# STARTED + trap KILLED (walltime/kill)
+append_master "[started] $(date '+%Y-%m-%d %H:%M:%S') job=$PBS_JOBID host=$(hostname)"
+trap 'append_master "[killed] $(date "+%Y-%m-%d %H:%M:%S") job=$PBS_JOBID"; exit 143' TERM INT
+
 if [[ ! -x "$EXE" ]]; then
-  append_master "[error] $PBS_JOBID EXE not found: $EXE"
+  append_master "[error] $(date '+%Y-%m-%d %H:%M:%S') job=$PBS_JOBID EXE not found: $EXE"
   exit 1
 fi
 
 if [[ ! -f "$MATRICES_DIR/$MATRIX" ]]; then
-  append_master "[error] $PBS_JOBID matrix not found: $MATRIX (expected in $MATRICES_DIR)"
+  append_master "[error] $(date '+%Y-%m-%d %H:%M:%S') job=$PBS_JOBID matrix not found: $MATRIX (expected in $MATRICES_DIR)"
   exit 2
 fi
 
@@ -61,7 +64,7 @@ CMD=( mpirun -np "$NP" --hostfile "$PBS_NODEFILE"
       --bind-to core --map-by "ppr:${RPN}:node:PE=${THREADS}"
       "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" )
 
-# Catturo tutto in temp; se fail appendo un tail al file unico
+# Esegui “quiet”: cattura output in temp, appende solo su errore
 TMPLOG="${TMPDIR:-/tmp}/spmv_mpi_${PBS_JOBID}.log"
 
 set +e
@@ -78,7 +81,6 @@ if [[ $rc -eq 0 ]]; then
   exit 0
 else
   append_master "[error] $ts job=$PBS_JOBID exit=$rc NP=$NP threads=$THREADS matrix=$MATRIX (tail follows)"
-  # append tail (max 80 righe)
   if command -v flock >/dev/null 2>&1; then
     {
       flock -w 30 9
