@@ -17,7 +17,7 @@ module load cmake-3.15.4
 mkdir -p logs results bin/matrices
 chmod +x script/weak.sh
 
-# Parametri weak scaling
+#weak scaling parameters
 export ROWS_PER_RANK=16384
 export NNZ_PER_RANK=1000000
 

@@ -14,16 +14,15 @@ module purge
 module load gcc91
 module load openmpi-3.0.0--gcc-9.1.0
 
-# Matrici SOLO qui
 export MATRICES_DIR="$REPO_ROOT/bin/matrices"
 mkdir -p results
 
-# File unico (passato dal submit; default)
+# unique file
 MASTER_OUT="${MASTER_OUT:-$REPO_ROOT/results/pbs_out/spmv_mpi.out}"
 mkdir -p "$(dirname "$MASTER_OUT")"
 touch "$MASTER_OUT"
 
-# Lock per append pulito anche con job concorrenti
+# Lock for append, also for concurrent jobs
 LOCKFILE="${MASTER_OUT}.lock"
 append_master() {
   if command -v flock >/dev/null 2>&1; then
@@ -33,13 +32,13 @@ append_master() {
   fi
 }
 
-# --- scrivi subito quando il job parte davvero ---
+# --- write immediately when the job starts ---
 append_master "[started] $(date '+%Y-%m-%d %H:%M:%S') job=$PBS_JOBID host=$(hostname)"
 
 # se vieni terminato (walltime / qdel / ecc.)
 trap 'append_master "[killed] $(date "+%Y-%m-%d %H:%M:%S") job=$PBS_JOBID"; exit 143' TERM INT
 
-# cattura anche errori "early" (module load, cd, ecc.)
+#catch errors early (module load, cd, ecc.)
 set -E
 trap 'rc=$?; append_master "[error] $(date "+%Y-%m-%d %H:%M:%S") job=$PBS_JOBID early-failure rc=$rc"; exit $rc' ERR
 
@@ -72,7 +71,6 @@ CMD=( mpirun -np "$NP" --hostfile "$PBS_NODEFILE"
       --bind-to core --map-by "ppr:${RPN}:node:PE=${THREADS}"
       "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" )
 
-# Catturo tutto in temp; se fail appendo un tail al file unico
 TMPLOG="${TMPDIR:-/tmp}/spmv_mpi_${PBS_JOBID}.log"
 
 set +e
@@ -90,7 +88,7 @@ if [[ $rc -eq 0 ]]; then
 else
   append_master "[error] $ts job=$PBS_JOBID exit=$rc NP=$NP threads=$THREADS matrix=$MATRIX (tail follows)"
 
-  # append tail (max 80 righe) in modo atomic-ish
+  # append tail (max 80 rows) in atomic-ish way
   if command -v flock >/dev/null 2>&1; then
     {
       flock -w 30 9

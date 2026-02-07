@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# inizializza moduli
+# module initialization
 source /etc/profile
 source /etc/profile.d/modules.sh
 
