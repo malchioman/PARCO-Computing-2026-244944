@@ -8,20 +8,34 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$PBS_O_WORKDIR}"
 EXE="${EXE:-$REPO_ROOT/bin/spmv_mpi}"
-
 cd "$REPO_ROOT"
 
 module purge
 module load gcc91
 module load openmpi-3.0.0--gcc-9.1.0
 
-mkdir -p results
+# Matrici SOLO qui
 export MATRICES_DIR="$REPO_ROOT/bin/matrices"
+mkdir -p results
+
+# File unico (passato dal submit; default)
+MASTER_OUT="${MASTER_OUT:-$REPO_ROOT/results/pbs_out/spmv_mpi.out}"
+mkdir -p "$(dirname "$MASTER_OUT")"
+
+# Lock per append “pulito” anche con job concorrenti
+LOCKFILE="${MASTER_OUT}.lock"
+append_master() {
+  if command -v flock >/dev/null 2>&1; then
+    { flock -w 30 9; printf "%s\n" "$1" >> "$MASTER_OUT"; } 9>"$LOCKFILE"
+  else
+    printf "%s\n" "$1" >> "$MASTER_OUT"
+  fi
+}
 
 # ---- args dal submit ----
 NP="${NP:?missing NP}"
 THREADS="${THREADS:?missing THREADS}"
-MATRIX="${MATRIX:?missing MATRIX}"   # basename, sta in bin/matrices
+MATRIX="${MATRIX:?missing MATRIX}"   # basename
 SCHED="${SCHED:-static}"
 CHUNK="${CHUNK:-64}"
 REPEATS="${REPEATS:-10}"
@@ -34,12 +48,12 @@ export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
 export OMP_PLACES="${OMP_PLACES:-cores}"
 
 if [[ ! -x "$EXE" ]]; then
-  echo "[fatal] EXE not found or not executable: $EXE"
+  append_master "[error] $PBS_JOBID EXE not found: $EXE"
   exit 1
 fi
 
 if [[ ! -f "$MATRICES_DIR/$MATRIX" ]]; then
-  echo "[fatal] matrix not found in $MATRICES_DIR : $MATRIX"
+  append_master "[error] $PBS_JOBID matrix not found: $MATRIX (expected in $MATRICES_DIR)"
   exit 2
 fi
 
@@ -47,13 +61,33 @@ CMD=( mpirun -np "$NP" --hostfile "$PBS_NODEFILE"
       --bind-to core --map-by "ppr:${RPN}:node:PE=${THREADS}"
       "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" )
 
-if "${CMD[@]}" $FLAGS >/dev/null 2>&1; then
-  echo "[ok] spmv_mpi completed successfully (NP=$NP, threads=$THREADS, matrix=$MATRIX). Results saved in results/spmv_mpi_results.txt and results/spmv_mpi_results.tsv"
+# Catturo tutto in temp; se fail appendo un tail al file unico
+TMPLOG="${TMPDIR:-/tmp}/spmv_mpi_${PBS_JOBID}.log"
+
+set +e
+# shellcheck disable=SC2086
+"${CMD[@]}" $FLAGS >"$TMPLOG" 2>&1
+rc=$?
+set -e
+
+ts="$(date '+%Y-%m-%d %H:%M:%S')"
+
+if [[ $rc -eq 0 ]]; then
+  append_master "[ok] $ts job=$PBS_JOBID NP=$NP threads=$THREADS matrix=$MATRIX -> results/spmv_mpi_results.txt , results/spmv_mpi_results.tsv"
+  rm -f "$TMPLOG"
   exit 0
 else
-  rc=$?
-  echo "[error] spmv_mpi failed (exit=$rc). Rerunning verbosely to show the error:"
-  "${CMD[@]}" $FLAGS
+  append_master "[error] $ts job=$PBS_JOBID exit=$rc NP=$NP threads=$THREADS matrix=$MATRIX (tail follows)"
+  # append tail (max 80 righe)
+  if command -v flock >/dev/null 2>&1; then
+    {
+      flock -w 30 9
+      tail -n 80 "$TMPLOG" >> "$MASTER_OUT"
+      printf "\n" >> "$MASTER_OUT"
+    } 9>"$LOCKFILE"
+  else
+    tail -n 80 "$TMPLOG" >> "$MASTER_OUT"
+    printf "\n" >> "$MASTER_OUT"
+  fi
   exit $rc
 fi
-
