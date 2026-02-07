@@ -1,96 +1,56 @@
 #!/bin/bash
+#PBS -q short_cpuQ
 #PBS -N spmv_mpi
+#PBS -l walltime=01:00:00
 #PBS -j oe
 
 set -euo pipefail
 
-# ROOT passato dal submit; fallback: assume PBS_O_WORKDIR come root repo
-ROOT="${ROOT:-$PBS_O_WORKDIR}"
+# Repo root passato dal submit script
+REPO_ROOT="${REPO_ROOT:-$PBS_O_WORKDIR}"
+EXE="${EXE:-$REPO_ROOT/bin/spmv_mpi}"
 
-cd "$ROOT"
-mkdir -p "$ROOT/logs"
-
-# Log per-job (così sai sempre dove guardare)
-LOGFILE="$ROOT/logs/spmv_${PBS_JOBID}.log"
-
-# Stampa su log (che poi viene tailato dal submit)
-exec >"$LOGFILE" 2>&1
-
-echo "============================================================"
-echo "JOB START"
-echo "JOBID   : ${PBS_JOBID:-N/A}"
-echo "ROOT    : $ROOT"
-echo "DATE    : $(date)"
-echo "HOST    : $(hostname)"
-echo "============================================================"
+cd "$REPO_ROOT"
 
 module purge
 module load gcc91
 module load openmpi-3.0.0--gcc-9.1.0
 
-EXE="${EXE:-$ROOT/bin/spmv_mpi}"
-if [[ ! -x "$EXE" ]]; then
-  echo "[fatal] eseguibile non trovato o non eseguibile: $EXE"
-  exit 1
-fi
+mkdir -p logs results
+export MATRICES_DIR="$REPO_ROOT/bin/matrices"
 
-export MATRICES_DIR="${MATRICES_DIR:-$ROOT/bin/matrices}"
+# Parametri passati dal submit
+NP="${NP:?missing NP}"
+THREADS="${THREADS:?missing THREADS}"
+MATRIX="${MATRIX:?missing MATRIX}"
+SCHED="${SCHED:-static}"
+CHUNK="${CHUNK:-64}"
+REPEATS="${REPEATS:-10}"
+TRIALS="${TRIALS:-5}"
+FLAGS="${FLAGS:-}"
 
-# Argomenti al main passati via ARGS dal submit
-if [[ $# -eq 0 && -n "${ARGS:-}" ]]; then
-  # shellcheck disable=SC2086
-  set -- $ARGS
-fi
-
-if [[ $# -lt 2 ]]; then
-  echo "Usage: <matrix.mtx> <threads> [static|dynamic|guided|auto] [chunk] [repeats] [trials] [flags...]"
-  exit 2
-fi
-
-THREADS="$2"
 export OMP_NUM_THREADS="$THREADS"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
 export OMP_PLACES="${OMP_PLACES:-cores}"
 
-NP="${NP:-${PBS_NP:-1}}"
-PPN="${PPN:-8}"
-
-RPN=$(( PPN / OMP_NUM_THREADS ))
-if [[ "$RPN" -lt 1 ]]; then
-  echo "[fatal] threads ($OMP_NUM_THREADS) > ppn ($PPN): non mappabile senza oversubscribe"
-  exit 3
+if [[ ! -x "$EXE" ]]; then
+  echo "[fatal] EXE not found or not executable: $EXE"
+  exit 1
 fi
 
-echo "CONFIG"
-echo "  EXE          : $EXE"
-echo "  MATRICES_DIR : $MATRICES_DIR"
-echo "  NP (ranks)   : $NP"
-echo "  OMP threads  : $OMP_NUM_THREADS"
-echo "  PPN          : $PPN"
-echo "  Ranks/node   : $RPN"
-echo "  ARGS(main)   : $*"
-echo "------------------------------------------------------------"
+# mapping: RPN (ranks per node) viene passato dal submit
+RPN="${RPN:?missing RPN}"
 
-HOSTFILE="${PBS_NODEFILE:-}"
+CMD=( mpirun -np "$NP" --hostfile "$PBS_NODEFILE"
+      --bind-to core --map-by "ppr:${RPN}:node:PE=${THREADS}"
+      "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" )
 
-# Line-buffering per vedere output “live” nel tail (se stdbuf disponibile)
-STDBUF=""
-if command -v stdbuf >/dev/null 2>&1; then
-  STDBUF="stdbuf -oL -eL"
-fi
-
-if [[ -n "$HOSTFILE" && -f "$HOSTFILE" ]]; then
-  $STDBUF mpirun -np "$NP" --hostfile "$HOSTFILE" \
-    --bind-to core --map-by "ppr:${RPN}:node:PE=${OMP_NUM_THREADS}" \
-    "$EXE" "$@"
+# QUIET=1 => non stampa l'output del programma (default)
+QUIET="${QUIET:-1}"
+if [[ "$QUIET" == "1" ]]; then
+  # shellcheck disable=SC2086
+  "${CMD[@]}" $FLAGS >/dev/null 2>&1
 else
-  $STDBUF mpirun -np "$NP" \
-    --bind-to core --map-by "ppr:${RPN}:node:PE=${OMP_NUM_THREADS}" \
-    "$EXE" "$@"
+  # shellcheck disable=SC2086
+  "${CMD[@]}" $FLAGS
 fi
-
-echo "============================================================"
-echo "JOB END"
-echo "DATE: $(date)"
-echo "LOG : $LOGFILE"
-echo "============================================================"
