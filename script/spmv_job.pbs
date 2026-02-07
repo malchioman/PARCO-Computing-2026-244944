@@ -6,7 +6,6 @@
 
 set -euo pipefail
 
-# Repo root passato dal submit script
 REPO_ROOT="${REPO_ROOT:-$PBS_O_WORKDIR}"
 EXE="${EXE:-$REPO_ROOT/bin/spmv_mpi}"
 
@@ -17,17 +16,20 @@ module load gcc91
 module load openmpi-3.0.0--gcc-9.1.0
 
 mkdir -p logs results
+
+# Matrici: SOLO qui
 export MATRICES_DIR="$REPO_ROOT/bin/matrices"
 
-# Parametri passati dal submit
+# ---- args dal submit ----
 NP="${NP:?missing NP}"
 THREADS="${THREADS:?missing THREADS}"
-MATRIX="${MATRIX:?missing MATRIX}"
+MATRIX="${MATRIX:?missing MATRIX}"   # deve essere solo basename: foo.mtx
 SCHED="${SCHED:-static}"
 CHUNK="${CHUNK:-64}"
 REPEATS="${REPEATS:-10}"
 TRIALS="${TRIALS:-5}"
 FLAGS="${FLAGS:-}"
+RPN="${RPN:?missing RPN}"
 
 export OMP_NUM_THREADS="$THREADS"
 export OMP_PROC_BIND="${OMP_PROC_BIND:-close}"
@@ -38,18 +40,27 @@ if [[ ! -x "$EXE" ]]; then
   exit 1
 fi
 
-# mapping: RPN (ranks per node) viene passato dal submit
-RPN="${RPN:?missing RPN}"
+# Check matrice (così non sprechi tempo di compute)
+if [[ ! -f "$MATRICES_DIR/$MATRIX" ]]; then
+  echo "[fatal] matrix not found in $MATRICES_DIR : $MATRIX"
+  exit 2
+fi
+
+# Log dedicato dell'eseguibile (output + errori) -> NON sporca PBS out
+RUNLOG="$REPO_ROOT/logs/spmv_mpi_run_${PBS_JOBID}.log"
 
 CMD=( mpirun -np "$NP" --hostfile "$PBS_NODEFILE"
       --bind-to core --map-by "ppr:${RPN}:node:PE=${THREADS}"
       "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" )
 
-# QUIET=1 => non stampa l'output del programma (default)
 QUIET="${QUIET:-1}"
 if [[ "$QUIET" == "1" ]]; then
   # shellcheck disable=SC2086
-  "${CMD[@]}" $FLAGS >/dev/null 2>&1
+  "${CMD[@]}" $FLAGS >"$RUNLOG" 2>&1 || {
+    rc=$?
+    echo "[job] spmv_mpi FAILED (exit=$rc). See: $RUNLOG"
+    exit $rc
+  }
 else
   # shellcheck disable=SC2086
   "${CMD[@]}" $FLAGS
