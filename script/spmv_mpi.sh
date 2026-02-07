@@ -19,19 +19,17 @@ FLAGS="$*"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PBS_SCRIPT="$SCRIPT_DIR/spmv_mpi.pbs"
-EXE="$REPO_ROOT/bin/spmv_mpi"
 
 MATRICES_DIR="$REPO_ROOT/bin/matrices"
-mkdir -p "$REPO_ROOT/results/pbs_out"
-
 MATRIX="$(basename "$MATRIX_IN")"
 
+# matrice SOLO in bin/matrices
 if [[ ! -f "$MATRICES_DIR/$MATRIX" ]]; then
-  echo "[fatal] matrix not found: $MATRIX"
-  echo "expected here: $MATRICES_DIR/$MATRIX"
+  echo "[fatal] matrix not found: $MATRIX (expected in $MATRICES_DIR)"
   exit 3
 fi
 
+# risorse (come strong: nodi da 72 core)
 NCPUS_NODE="${NCPUS_NODE:-72}"
 QUEUE="${QUEUE:-short_cpuQ}"
 WALLTIME="${WALLTIME:-01:00:00}"
@@ -48,17 +46,19 @@ if (( RPN < 1 )); then RPN=1; fi
 NODES=$(( (NP + RPN - 1) / RPN ))
 NCPUS_CHUNK=$(( RPN * THREADS ))
 
-TS="$(date +%Y%m%d_%H%M%S)"
-PBS_OUT="$REPO_ROOT/results/pbs_out/spmv_mpi_np${NP}_t${THREADS}_${TS}.out"
+# FILE UNICO con nome corto
+MASTER_OUT_REL="results/pbs_out/spmv_mpi.out"
+MASTER_OUT="$REPO_ROOT/$MASTER_OUT_REL"
+mkdir -p "$(dirname "$MASTER_OUT")"
+touch "$MASTER_OUT"
 
 JOBID=$(qsub \
   -q "$QUEUE" \
   -l "select=${NODES}:ncpus=${NCPUS_CHUNK}:mpiprocs=${RPN}" \
   -l "walltime=${WALLTIME}" \
-  -o "$PBS_OUT" -j oe \
-  -v "REPO_ROOT=${REPO_ROOT},EXE=${EXE},NP=${NP},THREADS=${THREADS},MATRIX=${MATRIX},SCHED=${SCHED},CHUNK=${CHUNK},REPEATS=${REPEATS},TRIALS=${TRIALS},FLAGS=${FLAGS},RPN=${RPN}" \
+  -o /dev/null -e /dev/null \
+  -v "REPO_ROOT=${REPO_ROOT},NP=${NP},THREADS=${THREADS},MATRIX=${MATRIX},SCHED=${SCHED},CHUNK=${CHUNK},REPEATS=${REPEATS},TRIALS=${TRIALS},FLAGS=${FLAGS},RPN=${RPN},MASTER_OUT=${MASTER_OUT}" \
   "$PBS_SCRIPT"
 )
 
-echo "Job submitted: $JOBID"
-echo "PBS output: $PBS_OUT"
+echo "[submitted] $JOBID  ->  $MASTER_OUT_REL"
