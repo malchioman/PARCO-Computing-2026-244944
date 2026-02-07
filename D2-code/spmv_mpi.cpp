@@ -1,4 +1,3 @@
-// D2-code/spmv_mpi.cpp
 #include <mpi.h>
 #include <omp.h>
 
@@ -247,8 +246,7 @@ static MPI_Datatype make_mpi_coo_type()
 // MPI-IO helpers: read large ranges in pieces (avoid int limit)
 // ============================================================
 
-static void mpi_file_read_at_big(MPI_File fh, MPI_Offset off,
-                                 char* buf, MPI_Offset len)
+static void mpi_file_read_at_big(MPI_File fh, MPI_Offset off, char* buf, MPI_Offset len)
 {
     const MPI_Offset MAX = (MPI_Offset)std::numeric_limits<int>::max();
     MPI_Offset done = 0;
@@ -299,10 +297,7 @@ static bool parse_triplet_line(const std::string& line, int& i0, int& j0, double
 // Parallel read MatrixMarket with MPI-IO chunk parsing
 // ============================================================
 
-static void parallel_read_matrix_market_mpiio(const char* path,
-                                              int rank, int P,
-                                              int& M, int& N, int& nz_header,
-                                              std::vector<COOEntry>& coo_chunk)
+static void parallel_read_matrix_market_mpiio(const char* path,int rank, int P, int& M, int& N, int& nz_header, std::vector<COOEntry>& coo_chunk)
 {
     MPI_File fh;
     int rc = MPI_File_open(MPI_COMM_WORLD, path, MPI_MODE_RDONLY, MPI_INFO_NULL, &fh);
@@ -450,8 +445,7 @@ static void parallel_read_matrix_market_mpiio(const char* path,
 // Redistribute COO triplets by owner row (cyclic i%P)
 // ============================================================
 
-static void redistribute_coo_by_row_owner(std::vector<COOEntry>& coo_chunk,
-                                          int /*rank*/, int P)
+static void redistribute_coo_by_row_owner(std::vector<COOEntry>& coo_chunk, int /*rank*/, int P)
 {
     std::vector<int> sendcounts(P, 0);
     for (const auto& e : coo_chunk) {
@@ -498,8 +492,7 @@ static void redistribute_coo_by_row_owner(std::vector<COOEntry>& coo_chunk,
 // COO -> CSR local (cyclic rows)
 // ============================================================
 
-static CSRLocal coo_to_csr_cyclic_rows(const std::vector<COOEntry>& coo_local,
-                                       int M_global, int rank, int P)
+static CSRLocal coo_to_csr_cyclic_rows(const std::vector<COOEntry>& coo_local,int M_global, int rank, int P)
 {
     CSRLocal A;
     A.localM = num_local_rows_cyclic(M_global, rank, P);
@@ -589,10 +582,7 @@ static const char* omp_sched_name(omp_sched_t k)
 // SpMV local (OpenMP) using schedule(runtime)
 // ============================================================
 
-static void spmv_csr_local_omp_runtime(const CSRLocal& A,
-                                       const std::vector<double>& x_local,
-                                       const std::vector<int>& g2l,
-                                       std::vector<double>& y_local)
+static void spmv_csr_local_omp_runtime(const CSRLocal& A, const std::vector<double>& x_local, const std::vector<int>& g2l, std::vector<double>& y_local)
 {
     y_local.assign((size_t)A.localM, 0.0);
 
@@ -634,11 +624,7 @@ static double percentile90_ms_from_samples(std::vector<double>& samples)
 // Ghost plan build + per-iteration exchange (values only)
 // ============================================================
 
-static void build_ghost_plan_and_x(int rank, int P, int N,
-                                   const std::vector<int>& colind,
-                                   std::vector<double>& x_local,
-                                   std::vector<int>& g2l,
-                                   GhostPlan& plan)
+static void build_ghost_plan_and_x(int rank, int P, int N, const std::vector<int>& colind, std::vector<double>& x_local, std::vector<int>& g2l, GhostPlan& plan)
 {
     plan = GhostPlan{};
     plan.P = P;
@@ -712,10 +698,7 @@ static void build_ghost_plan_and_x(int rank, int P, int N,
     plan.tmp_recvvals.assign(plan.sendcols.size(), 0.0);
 }
 
-static inline void exchange_ghost_values(GhostPlan& plan,
-                                        const std::vector<int>& g2l,
-                                        const std::vector<double>& x_local,
-                                        std::vector<double>& x_work)
+static inline void exchange_ghost_values(GhostPlan& plan, const std::vector<int>& g2l, const std::vector<double>& x_local, std::vector<double>& x_work)
 {
     if (!plan.has_ghosts()) return;
 
@@ -754,11 +737,9 @@ static size_t bytes_of_vector_double(const std::vector<double>& v) {
 static size_t bytes_of_vector_coo(const std::vector<COOEntry>& v) {
     return v.size() * sizeof(COOEntry);
 }
-
 static double bytes_to_mib(size_t b) {
     return (double)b / (1024.0 * 1024.0);
 }
-
 static double bytes_to_kib(size_t b) {
     return (double)b / 1024.0;
 }
@@ -838,10 +819,8 @@ static bool read_matrix_market_rank0_sequential(const std::string& path, CSRFull
     return true;
 }
 
-// Fast full SpMV using precomputed x (D1-style)
-static void spmv_csr_full(const CSRFull& A,
-                          const std::vector<double>& x,
-                          std::vector<double>& y)
+// Fast full SpMV using precomputed x
+static void spmv_csr_full(const CSRFull& A, const std::vector<double>& x, std::vector<double>& y)
 {
     y.assign((size_t)A.M, 0.0);
 
@@ -858,15 +837,10 @@ static void spmv_csr_full(const CSRFull& A,
 
 // IMPORTANT: this function is COLLECTIVE (all ranks must call it).
 // It returns true iff validation was performed (not skipped by thresholds).
-static bool validate_on_rank0_collective(const std::string& mtxResolved,
-                                        int rank,
-                                        int M, int N, int P,
-                                        const std::vector<double>& y_local,
-                                        ValidationResult& out,
-                                        bool force_validate,
-                                        long long nnz_used_global)
+static bool validate_on_rank0_collective(const std::string& mtxResolved, int rank, int M, int N, int P, const std::vector<double>& y_local,
+                                        ValidationResult& out, bool force_validate, long long nnz_used_global)
 {
-    const long long MAX_NNZ_VALIDATE = 5'000'000LL; // 5M entries
+    const long long MAX_NNZ_VALIDATE = 5'000'000LL; // 5M nnz values
     const long long MAX_M_VALIDATE   = 2'000'000LL; // 2M rows
 
     int do_it = 1;
@@ -1385,7 +1359,7 @@ int main(int argc, char** argv)
         std::cout << "EXTRA RESULTS (COMM-ONLY)\n";
         std::cout << "  Comm-only P90 time   : " << p90_comm_ms << " ms\n\n";
 
-        // These two lines are parsed by your scripts (awk) -> DO NOT CHANGE WORDING
+        // These two lines are parsed by scripts (strong, weak) (awk)
         std::cout << "COMM VOLUME PER ITERATION (ghost doubles only)\n";
         std::cout << "  Per-rank max (KiB): total=" << commKiB_max << "  avg=" << commKiB_avg << "\n";
         std::cout << "MEMORY FOOTPRINT (rough estimate)\n";
