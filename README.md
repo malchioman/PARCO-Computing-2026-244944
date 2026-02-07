@@ -195,7 +195,6 @@ After a successful build, you should see:
 === BUILD COMPLETED ===
 ```
 
-
 Executables are produced in:
 ```
 bin/
@@ -206,6 +205,10 @@ bin/
 #from the root of the repository (the PARCO-Computing-2026-244944 directory)
 source script/env.sh
 script/build.sh
+```
+If scripts fail with “Permission denied”:
+```
+chmod +x script/*.sh
 ```
 ---
 
