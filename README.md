@@ -1,144 +1,231 @@
 
 
 
-# Parallel Sparse Matrix–Vector Multiplication in CSR Format (OpenMP)
+# Distributed Sparse Matrix–Vector Multiplication (SpMV) — OpenMP (D1) and MPI+OpenMP (D2)
 
-##  Introduction
 
-This project contains the implementation used for the study:
+## Introduction
 
-**Parallel Sparse Matrix–Vector Multiplication in CSR Format on Multicore CPUs with OpenMP**  
+This project contains the implementations used for the study:
+
+**Distributed Sparse Matrix–Vector Multiplication (SpMV) — OpenMP (D1) and MPI+OpenMP (D2)**  
 Author: **Massimo Malchiodi**, University of Trento
 
-The repository provides a complete OpenMP-based implementation of **Sparse Matrix–Vector Multiplication (SpMV)** in **Compressed Sparse Row (CSR)** format.  
-The computation is parallelized using a **row-wise loop decomposition** with configurable OpenMP scheduling (`static`, `dynamic`, `guided`).
+The repository provides two implementations of **Sparse Matrix–Vector Multiplication (SpMV)** on CPU:
+
+- **D1 (OpenMP)**: shared-memory SpMV in **Compressed Sparse Row (CSR)** format, parallelized with a **row-wise loop decomposition** and configurable OpenMP scheduling (`static`, `dynamic`, `guided`).
+- **D2 (MPI + OpenMP)**: hybrid distributed-memory + shared-memory SpMV using **MPI ranks** (distributed work) and optional **OpenMP threads** inside each rank.
 
 The project includes:
 
-- The main CSR SpMV executable (`spmv_csr`)
-- Tools to generate matrices (`make_matrices`, `custom_matrix`)
-- Support for the **Matrix Market (.mtx)** format through the NIST `mmio` library
-- Scripts to run automated benchmarks on regular and irregular matrices
+- Main executables: `spmv_csr` (D1) and `spmv_mpi` (D2)
+- Matrix tools: `make_matrices`, `custom_matrix`, `strong_matrix`
+- Support for **Matrix Market (`.mtx`)** format through the NIST `mmio` library (`libmmio.a`)
+- Helper scripts for benchmarking and scaling experiments (`script/`)
 
-All executables are copied automatically into:
+## Repository layout
+
+The repository is organized as follows:
+
+- `D1-code/` — Deliverable 1 sources (OpenMP CSR SpMV)
+- `D2-code/` — Deliverable 2 sources (MPI + OpenMP hybrid SpMV)
+- `mmio/` — Matrix Market I/O (NIST `mmio.c/h`, built as `libmmio.a`)
+- `script/` — helper scripts (build, runs, scaling, PBS job files)
+- `results/` — output logs produced by executables
+
+After building, executables are placed in:
 
 ```
-
 bin/
-
 ```
 
-Input matrices (generated or downloaded) are stored in:
+
+Input matrices (generated or downloaded) must be placed in:
 
 ```
-
 bin/matrices/
+```
 
-````
+
+### Executables produced in `bin/`
+
+- `spmv_csr` — **D1** main executable (OpenMP CSR SpMV)
+- `make_matrices` — generates default test matrices into `bin/matrices/`
+- `custom_matrix` — generates a custom random matrix (user-defined shape and nnz)
+- `spmv_mpi` — **D2** main executable (MPI + OpenMP hybrid SpMV)
+- `strong_matrix` — downloads the real `.mtx` matrix used for **strong scaling** into `bin/matrices/`
+- `libmmio.a` — static library used internally for Matrix Market I/O
+---
+
+
+## Requirements and Environment Setup
+
+### Linux-first workflow
+
+This repository (code + scripts) is designed to be built and run on **Linux** (including HPC clusters).
+The D2 implementation requires an **MPI toolchain** (e.g., OpenMPI) and the provided scripts assume a Unix-like shell environment.
+
+Native Windows is **not** the target workflow for this project.
+Windows users should use **WSL2** (recommended) to get a consistent Linux toolchain.
 
 ---
 
-##  Requirements and Environment Setup
+### Windows users (WSL2)
 
-###  Requirements
+If you are on Windows, use **WSL2** to build and run the project.
 
+1) Install WSL2 (PowerShell as Administrator):
+```powershell
+wsl --install
+```
+Reboot if requested, then install Ubuntu from the Microsoft Store (if it is not installed automatically).
+2) Inside Ubuntu (WSL terminal), install requirements:
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake git \
+  openmpi-bin libopenmpi-dev
+```
+
+This provides:
+
+- a C/C++ compiler toolchain (gcc/g++, make)
+
+- CMake
+
+- OpenMPI with the compiler wrappers mpicc and mpic++ (required by script/build.sh)
+
+You can verify the setup with:
+```bash
+cmake --version
+mpicc --version
+mpirun --version
+```
+---
+### Requirements
 To build and run the project you need:
 
-- **CMake ≥ 3.15**
-- **C++17 compiler** with OpenMP support  
-  - GCC ≥ 9 (Linux)
-  - Clang / Apple Clang (macOS)
-  - MSVC or MinGW-w64 (Windows)
-- Matrix Market I/O library (included as `mmio.c`)
+- CMake ≥ 3.15
 
----
+- C++17 compiler with OpenMP support (e.g., GCC ≥ 9)
 
-### Building on HPC / University Cluster (CMake and Compilers)
+- MPI compiler wrappers available in PATH:
+    1)  mpicc
 
-On some HPC systems (including the UniTN cluster), the default software
-environment may not provide sufficiently recent versions of CMake or the C/C++
-compilers required to build this project.  
-If you encounter errors such as:
-````
-CMake 3.15 or newer is required
-C++17 is not supported by the default compiler
-The 'cc' or 'g++' command is not available
-````
+    2) mpic++
 
-you must first load the appropriate modules.
+Matrix Market I/O is provided via the included NIST mmio sources (built as libmmio.a).
+___
 
-#### Load a recent CMake version 
+### HPC / UniTN cluster environment (script/env.sh)
+
+On the UniTN cluster the required toolchain is loaded via environment modules.
+To set up a correct build/run environment, use:
 ```bash
-module load cmake-3.15.4   # or any version ≥ 3.15
-````
-Load a recent GCC / G++ compiler (recommended)
-```bash
-module load gcc91    # or any version with full C++17 support
+source script/env.sh
 ```
-Alternatively: load Clang / LLVM (if preferred)
-```bash
-module load clang/14.0.6
-```
-After loading the required modules, the build process works normally:
 
----
+
+What it does:
+
+- initializes the module system
+
+- loads:
+
+  1) gcc91
+
+  2) openmpi-3.0.0--gcc-9.1.0
+
+  3) cmake-3.15.4
+
+- exports OpenMPI compiler paths (OMPI_CC, OMPI_CXX) and a few runtime settings
+
+- replaces the current shell with a fresh one that inherits the environment (exec bash)
+
+After running it, you should see:
+```
+=== ENVIRONMENT READY ===
+```
+
+
+Note: env.sh is meant for the cluster module environment.
+On a standard Linux/WSL installation you usually do not need it (just install packages and ensure mpicc/mpic++ exist).
+___
 
 ### Clone the Repository
 
 ```bash
 git clone https://github.com/malchioman/PARCO-Computing-2026-244944.git
 cd PARCO-Computing-2026-244944
-````
+```
+___ 
+### Build (script/build.sh)
 
-
----
-
-### Build Instructions
-
-make sure to be in PARCO-Computing-2026-244944 directory
-#### Linux / macOS
-
+To simplify building (especially on the cluster), the repository provides:
 ```bash
-mkdir build  
-cd build      
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build .
-cd ..
+script/build.sh   # CMake Release build using MPI compiler wrappers.
 ```
 
-After building, executables will appear in:
+Run it from anywhere:
+```bash 
+bash script/build.sh
+```
 
+
+What it does:
+
+- checks that mpicc and mpic++ are available in PATH
+(if not, it stops with an error and suggests running script/env.sh)
+
+- configures a Release build in build/
+
+- builds with:
+
+  1) DPARCO_BUILD_MPI=ON
+
+  2) DPARCO_BUILD_OMP=ON
+
+  3) DPARCO_MARCH_NATIVE=OFF
+
+  4) CMAKE_C_COMPILER=mpicc
+
+  5) CMAKE_CXX_COMPILER=mpic++
+
+After a successful build, you should see:
+```
+=== BUILD COMPLETED ===
+```
+
+
+Executables are produced in:
 ```
 bin/
 ```
 
-#### Windows (Visual Studio)
-
-```bat
-mkdir build
-cd build
-cmake .. -G "Visual Studio 17 2022" -A x64
-cmake --build . --config Release
-cd ..
+#### Recommended cluster flow:
+```bash
+#from the root of the repository (the PARCO-Computing-2026-244944 directory)
+source script/env.sh
+script/build.sh
 ```
-
-Executables will be placed in:
-
-```
-bin\
-```
-
 ---
 
-## Generate Matrices (Required Before Running SpMV)
-### Matrix generation:
 
-All matrices used in the experiments are generated by the `make_matrices`
-executable.  
-They are written in **Matrix Market (.mtx)** format into:
+## Generate matrices (required before running SpMV)
 
+All input matrices must be in **Matrix Market (`.mtx`)** format and are stored in:
+```
+bin/matrices/
+```
 
-To generate all standard matrices:
+### 1) Default benchmark matrices: `make_matrices`
+
+`make_matrices` generates a set of **standard test matrices** and writes them into:
+
+```
+bin/matrices/
+```
+
+So to generate all standard matrices:
 
 ```bash
 ./bin/make_matrices
@@ -173,7 +260,6 @@ using these commands:
 ./bin/make_matrices --social
 ./bin/make_matrices --web
 ```
-
 ---
 
 #### Controlling the Irregularity of irreg_50k.mtx:
@@ -202,171 +288,106 @@ Both forms are accepted:
 ./bin/make_matrices --k35
 ```
 
----
-
 This is useful for stress-testing SpMV under different irregularity conditions.
-### Generate custom random matrices (`custom_matrix`)
 
-The `custom_matrix` executable generates a **random sparse matrix** with user-defined size and density.
+--- 
 
-Its logic is:
+### 2) Generate custom random matrices (`custom_matrix`)
 
-* creates directory `matrices/`
-* sets default size = 10,000 × 10,000
-* sets density = 0.5
-* computes `nnz = rows × cols × density`
-* writes a Matrix Market file with random:
+custom_matrix generates a random Matrix Market file with a user-defined shape and number of nonzeros.
 
-    * row indices (1 to rows)
-    * column indices (1 to cols)
-    * values in [-10, +10]
-
-The output file is always:
-
+Usage:
 ```
-matrices/custom.mtx
+./bin/custom_matrix <out_path_or_name> <rows> <cols> <nnz>
 ```
 
-### Usage
+Examples:
+```bash
+# if you pass only a filename, it is written into bin/matrices/ automatically
+./bin/custom_matrix weak_P4 65536 65536 4000000
 
-The program accepts also  **three optional parameters**:
+# explicit output path (directories are created if needed)
+./bin/custom_matrix bin/matrices/weak_P8.mtx 131072 131072 8000000
+```
 
-- `rows` – number of matrix rows (integer)
-- `cols` – number of matrix columns (integer)
-- `density` – fraction of nonzero elements (0–1)
+Notes:
 
-If parameters are omitted, all defaults are used.
+- If the output argument has no directory, the file is saved into bin/matrices/.
+
+- The .mtx extension is forced if missing.
+
+- Entries are generated with random (i, j) (duplicates may appear) and values in [-10, +10].
+
+- The RNG seed is deterministic (depends on rows/cols/nnz), so the same command reproduces the same matrix.
+#### ⚠️ Generation may take longer and produce a large file.
+
+---
+### 3) Real-world matrix for strong scaling: strong_matrix
+
+strong_matrix downloads a real .mtx matrix used for strong-scaling experiments and stores it into:
+```
+bin/matrices/
+```
+Run:
+```bash
+# from the root of the repository
+./bin/strong_matrix
+```
+
+This downloads and produces:
+```
+bin/matrices/kron_g500-logn21.mtx
+```
+Notes:
+
+- The tool currently supports only kron_g500-logn21 (it is the default; passing a different name exits with an error).
+
+- It uses curl (with resume and retries) and tar under the hood.
+
+- After extraction, it cleans up the .tar.gz and temporary folder, keeping only the final .mtx.
+
+___
+
+### Quick sanity check
+
+After generation/download, you should see .mtx files here:
+```bash
+#from the root of the repository
+ls -lah bin/matrices
+```
+
+___
+## OpenMP CSR SpMV (Deliverable 1 (D1))
+
+### What it does
+
+Deliverable 1 implements **Sparse Matrix–Vector Multiplication** in **CSR (Compressed Sparse Row)** format on a single shared-memory machine.
+The computation is parallelized with **OpenMP** using a **row-wise loop decomposition** and supports different scheduling policies:
+
+- `static`
+- `dynamic`
+- `guided`
+
+The code also performs a **numerical validation** by comparing the parallel result against a single-thread CSR reference implementation and reports:
+- `rel_L2_err`  (relative L2 error)
+- `max_abs_err` (maximum absolute error)
+
+Results are logged automatically in:
+```
+results/spmv_results.txt
+```
 
 ---
 
-## Examples
-
-Below are some practical examples of how to generate custom random matrices
-using the `custom_matrix` executable.
-
----
-
-- 1. Generate the default matrix (10,000 × 10,000, density = 0.5)**
-
-```bash
-cd bin
-./custom_matrix
-
-```
----
-- 2. Generate a 2,000 × 2,000 matrix with density 0.10
-```bash
-./custom_matrix 2000 2000 0.10
-
-```
-This produces a sparse matrix with approximately:
-```bash
-nnz ≈ 2000 × 2000 × 0.10 = 400,000 nonzeros
-
-```
----
-- 3. Generate a tall matrix: 50,000 × 1,000 with density 0.02
-```bash
-./custom_matrix 50000 1000 0.02
-
-
-```
-Useful for testing SpMV performance on highly non-square matrices.
-
----
-4. Generate a very sparse matrix (density = 0.001)
-```bash   
-./custom_matrix 10000 10000 0.001
-
-
-```
-This generates:
-```bash
-nnz ≈ 10000 × 10000 × 0.001 = 100,000 nonzeros
-
-```
-
----
-5. Generate a
- dense-like sparse matrix (density = 0.8)
-```bash   
-./custom_matrix 5000 5000 0.8
-
-
-```
-This produces a heavy matrix with:
-```bash
-nnz ≈ 5000 × 5000 × 0.8 = 20,000,000 nonzeros
-
-```
-### ⚠️ Generation may take longer and produce a large file.
-
----
-
-## Scripts and Executables
-
-###  Provided Scripts
-
-The repository includes helper scripts to automatically execute benchmarks on two predefined scenarios:
-
-* **Regular matrix → OpenMP `static` scheduling**
-* **Irregular matrix → OpenMP `dynamic` scheduling**
-
-both with 20 threads and 64 chunks
-
-These scripts are *optional* but useful for reproducible tests, in order to make easier the comparison between sequential and parallel code the repository included also:
-
-- a script for the sequential multiplication of a regular matrix,
-- a script for the sequential multiplication for the irregular matrix 
-
-#### Linux / macOS
-
-```bash
-./script/runreg.sh    # Regular matrix, static scheduling
-./script/runirr.sh    # Irregular matrix, dynamic scheduling
-./script/seqreg.sh    # sequential matrix vectror multiplication with a regular matrix
-./script/seqirr.sh    # sequential matrix vectror multiplication with an irregular matrix
-```
-
-#### Windows (PowerShell)
-
-```powershell
-.\script\runreg.ps1
-.\script\runirr.ps1
-.\script\seqreg.ps1   
-.\script\seqreg.ps1   
-```
-
-### Script Execution Permissions on HPC Clusters
-
-When accessing some HPC clusters or shared Linux environments, the shell scripts included in the repository may not have execution permissions immediately after cloning the project.  
-If running a script results in a **“Permission denied”** error, for example:
-
-```bash
-./script/runreg.sh
-```
-you must first grant execution rights. To make all scripts executable at once, run:
-
-```bash
-chmod +x script/*.sh
-```
-Alternatively, you can enable individual scripts:
-
-```bash
-chmod +x script/runreg.sh script/runirr.sh script/seqreg.sh script/seqirr.sh
-```
-After setting the permissions, all scripts will run normally using the commands shown in this README.
----
-
-### Running the Main Executable (`spmv_csr`)
-
-Use this executable to manually perform your own experiments.
+### Run the main executable (`spmv_csr`)
 
 Syntax:
 
 ```bash
+#from the root of the repository
 ./bin/spmv_csr <matrix.mtx> <threads> [static|dynamic|guided] [chunk] [repeats] [trials]
 ```
+
 
 Parameters:
 
@@ -379,6 +400,22 @@ Parameters:
 | `[repeats]`             | Optional: number of inner repetitions                |
 | `[trials]`              | Optional: independent trials (P90 computed over all) |
 
+
+Examples: 
+```
+# Static scheduling, 12 threads
+./bin/spmv_csr bin/matrices/reg_150k.mtx 12 static
+```
+```
+# Dynamic scheduling, chunk=64, 10 repeats, 5 trials
+./bin/spmv_csr bin/matrices/irreg_50k.mtx 20 dynamic 64 10 5
+```
+```
+# Guided scheduling
+./bin/spmv_csr bin/matrices/irreg_50k.mtx 24 guided 128 5 3
+```
+___
+
 ### Output Logging (Automatic Result Saving)
 
 Each execution of `spmv_csr` produces two complementary outputs:
@@ -386,11 +423,11 @@ Each execution of `spmv_csr` produces two complementary outputs:
 1. **On-screen benchmark report**  
    A detailed human-readable summary is printed to the terminal at the end of each run.  
    It includes:
-  - matrix information (size and number of nonzeros)
-  - OpenMP configuration (threads, schedule, chunk size)
-  - timing settings (warmup, repeats, trials)
-  - validation metrics
-  - P90 execution time, GFLOP/s, and bandwidth
+   - matrix information (size and number of nonzeros)
+   - OpenMP configuration (threads, schedule, chunk size)
+   - timing settings (warmup, repeats, trials)
+   - validation metrics
+   - P90 execution time, GFLOP/s, and bandwidth
 
 2. **Automatic persistent logging**  
    Every run also appends a compact summary of the results to the file:
@@ -412,55 +449,351 @@ Results : p90_ms=0.123, GFLOPS=0.004, GBps=0.050
 ```
 This log file makes it easy to track and compare multiple experiments without needing to copy terminal output manually. It is especially useful for instructors, reproducibility, or automated batch testing.
 
+___ 
 
-### Numerical validation
+### helper scripts (script/)
 
-At the beginning of each run, `spmv_csr` performs a numerical validation step:
-the OpenMP result is compared against a single-thread CSR reference
-implementation. Two metrics are reported on `stderr`:
+The repository includes scripts to run reproducible D1 benchmarks on two predefined scenarios:
 
-- `rel_L2_err` – relative L2 error ‖y_par − y_ref‖₂ / ‖y_ref‖₂
-- `max_abs_err` – maximum absolute difference maxᵢ |y_par[i] − y_ref[i]|
+- Regular matrix → OpenMP static scheduling
 
-This check runs once per execution and is not included in the timing loop
-used to compute P90, GFLOP/s, and GB/s. For the matrices used in the report,
-both errors are identically zero in single precision.
+- Irregular matrix → OpenMP dynamic scheduling
 
-#### Example commands
-
-```bash
-# Static scheduling, 12 threads
-./bin/spmv_csr bin/matrices/irreg_50k.mtx 12 static
+Scripts:
+```
+bash script/runreg.sh    # regular matrix run
+bash script/runirr.sh    # irregular matrix run
+bash script/seqreg.sh    # sequential run (regular)
+bash script/seqirr.sh    # sequential run (irregular)
 ```
 
-```bash
-# Dynamic scheduling, chunk=64, 10 repeats, 5 trials
-./bin/spmv_csr bin/matrices/irreg_50k.mtx 20 dynamic 64 10 5
-```
 
-```bash
-# Guided scheduling on a custom-generated matrix
-./bin/spmv_csr bin/matrices/large_random.mtx 24 guided 128 5 3
+If scripts fail with “Permission denied”:
 ```
+chmod +x script/*.sh
+```
+---
+
+## MPI + OpenMP (hybrid SpMV) (Deliverable 2 (D2))
+
+### What it does
+
+Deliverable 2 implements **distributed Sparse Matrix–Vector Multiplication** using a hybrid model:
+
+- **MPI ranks** distribute the work across processes
+- **OpenMP threads** parallelize the local SpMV inside each rank
+
+Key points of this implementation:
+
+- **Input**: Matrix Market (`.mtx`)
+- **I/O**: parallel **MPI-IO** reading (chunk-based), then redistribution of triplets
+- **Distribution**: **1D cyclic row partitioning** (row `i` belongs to rank `i % P`)
+- **Local format**: each rank builds a local CSR for its cyclic rows
+- **Communication**: per-iteration **ghost/halo exchange** of required `x` entries via `MPI_Alltoallv`
+- **Timing**: reports **P90** of the **max-rank** time across all iterations, split into:
+    - end-to-end (comm + compute)
+    - compute-only
+    - comm-only
 
 ---
 
-### Summary of Executables
+### Run the main executable (`spmv_mpi`)
 
-| Executable        | Description                                                                   |
-| ----------------- | ----------------------------------------------------------------------------- |
-| **spmv_csr**      | Runs the CSR SpMV kernel with configurable OpenMP scheduling                  |
-| **make_matrices** | Generates default test matrices in `bin/matrices/`                            |
-| **custom_matrix** | Generates a random matrix (`large_random.mtx`) with configurable size/density |
-| **mmio**          | Utility for Matrix Market read/write (internal use)                           |
-| **gen_matrix**    | Additional matrix generator (if enabled in CMake)                             |
+Syntax (as printed by the program):
+
+```bash
+mpirun -np <ranks> ./bin/spmv_mpi <matrix.mtx> <threads> [static|dynamic|guided|auto] [chunk] [repeats] [trials] \
+  [--no-validate] [--validate-force] [--sort-rows]
+```
+
+| Argument                | Description                                           |
+|-------------------------|-------------------------------------------------------|
+| `<ranks>`               | Number of MPI ranks (`mpirun -np`)                    |
+| `<matrix.mtx>`          | Input matrix in Matrix Market format                  |
+| `<threads>`             | Number of OpenMP threads per rank                     |
+| `static/dynamic/guided` | OpenMP schedule (implemented via `schedule(runtime)`) |
+| `[chunk]`               | OpenMP chunk size (default 64)                        |
+| `[repeats]`             | inner repetitions per trial (default 10)              |
+| `[trials]`              | number of trials (default 5)                          |
+| `--no-validate`         | disable validation(optional)                          |
+| `--validate-force`      | force validation even for large matrices (optional)   |
+| `--sort-rows`           | sort CSR columns within each row (optional)           |
+
+Examples:
+```
+# 4 MPI ranks, 2 threads each, dynamic schedule, chunk=64
+mpirun -np 4 ./bin/spmv_mpi bin/matrices/kron_g500-logn21.mtx 2 dynamic 64 10 5
+```
+```
+# 8 ranks, 1 thread, static schedule (defaults chunk=64 repeats=10 trials=5)
+mpirun -np 8 ./bin/spmv_mpi bin/matrices/reg_150k.mtx 1 static
+```
+```
+# Disable validation (useful for very large matrices)
+mpirun -np 8 ./bin/spmv_mpi bin/matrices/kron_g500-logn21.mtx 2 dynamic 64 10 5 --no-validate
+```
+Matrix path resolution:
+
+You can pass either a full path or just a filename.
+If the file is not found as-is, rank 0 will try (in order):
+
+- `matrices/<name>`
+
+- `bin/matrices/<name>`
+
+- `../bin/matrices/<name>`
+
+- `$MATRICES_DIR/` (if `MATRICES_DIR` is set)
+  
+The resolved path is then broadcast to all ranks.
+
+___
+### Output Logging (Automatic Result Saving)
+
+Each execution of spmv_mpi produces:
+
+1) On-screen benchmark report (rank 0)
+A detailed summary is printed to stdout including:
+
+   - matrix info (M, N, nnz header vs nnz used)
+
+   - MPI/OpenMP configuration (ranks, threads, schedule, chunk)
+
+   - P90 timings (end-to-end / compute-only / comm-only)
+
+   - GFLOPS and estimated bandwidth
+
+   - communication volume per iteration (ghost exchange only)
+
+   - rough memory footprint estimate per rank
+
+2) Automatic persistent logging (rank 0)
+Results are appended under the repository results/ directory (resolved from the executable path):
+
+- Human-readable log:
+```
+results/spmv_mpi_results.txt
+```
+- TSV (easy to parse/plot):
+```
+results/spmv_mpi_results.tsv
+```
+___
+
+### Numerical validation
+
+Validation is **collective** (all ranks must participate):
+
+- Each rank computes its local `y` (for its cyclic rows).
+- Local `y` chunks are **gathered to rank 0**.
+- Rank 0 reads the full matrix sequentially, computes a reference SpMV, and compares it against the gathered distributed result.
+
+Reported metrics:
+
+- `rel_L2_error` — relative L2 error ‖y_par − y_ref‖₂ / ‖y_ref‖₂
+- `max_abs_error` — maximum absolute error maxᵢ |y_par[i] − y_ref[i]|
+
+#### Automatic skip thresholds
+
+To avoid excessive time/memory usage, validation is **automatically skipped** (unless forced) when:
+
+- `nnz_used_global > 5,000,000`  (**more than 5 million nonzeros**), **or**
+- `M > 2,000,000` (**more than 2 million rows**)
+
+where `nnz_used_global` is the **actual** number of nonzeros loaded and used across all ranks (after parsing and redistribution).
+
+#### Override flags
+
+- `--validate-force` — force validation even if thresholds are exceeded
+- `--no-validate` — disable validation entirely
+
+Examples:
+
+```bash
+# Force validation (may be slow / memory heavy)
+mpirun -np 8 ./bin/spmv_mpi bin/matrices/kron_g500-logn21.mtx 2 dynamic 64 10 5 --validate-force
+
+# Disable validation
+mpirun -np 8 ./bin/spmv_mpi bin/matrices/kron_g500-logn21.mtx 2 dynamic 64 10 5 --no-validate
+```
+___
+
+### D2 helper scripts (`script/`)
+
+The repository includes helper scripts to reproduce the **D2 experiments** used in the report:
+- a generic MPI run (submitted via PBS)
+- strong scaling
+- weak scaling
+
+All scripts assume:
+- the executable is `bin/spmv_mpi`
+- matrices are in `bin/matrices/`
+- results are written under `results/`
+
+
+> Note: some scripts parse specific lines from `spmv_mpi` output using `awk`.
+> For this reason, a few print lines in `spmv_mpi` are intentionally kept stable.
+
+
+---
+
+####  `script/spmv_mpi.sh` (PBS submission wrapper)
+
+This is the recommended way to run a **single MPI experiment on the cluster**.
+It requires `qsub` and submits `script/spmv_mpi.pbs`.
+
+Usage:
+
+```bash
+bash script/spmv_mpi.sh <NP> <threads> <matrix.mtx> [sched] [chunk] [repeats] [trials] [flags...]
+```
+
+Example:
+```
+script/spmv_mpi.sh 64 2 kron_g500-logn21.mtx dynamic 64 10 5 --no-validate
+```
+
+Important details:
+
+- the matrix must exist in bin/matrices/ (the script uses the basename of <matrix.mtx>)
+
+- defaults: QUEUE=short_cpuQ, WALLTIME=01:00:00, NCPUS_NODE=72
+
+- the script automatically computes how many nodes to request and how many MPI ranks per node to place (RPN)
+
+submission status is appended to a single master file:
+```
+results/pbs_out/spmv_mpi.out
+```
+___
+
+####   `script/strong.sh` (strong scaling)
+
+Runs a strong-scaling sweep: fixed matrix, varying the number of MPI ranks.
+
+Usage:
+```
+bash script/strong.sh <matrix.mtx> [threads] [sched] [chunk] [repeats] [trials]
+```
+
+Default rank list inside the script:
+```
+P_LIST=(1 2 4 8 16 32 64 128)
+```
+
+Output:
+
+a compact table is written to:
+```
+results/strong.txt
+```
+
+Notes:
+
+the script sets `MATRICES_DIR=bin/matrices` and runs `mpirun -np P --bind-to none` ...
+
+it extracts P90 times (e2e/compute/comm), GFLOPS/BW, and comm/memory estimates from the program output
+
+___
+
+####  `script/weak.sh` (weak scaling)
+
+Runs a weak-scaling sweep: matrix size grows with the number of MPI ranks.
+
+For each P in:
+```
+P_LIST=(1 2 4 8 16 32 64 128)
+```
+
+the script:
+
+- generates (if missing) a matrix using bin/custom_matrix:
+  - rows = ROWS_PER_RANK * P
+
+  - cols = rows
+
+  - nnz = NNZ_PER_RANK * P
+
+- runs spmv_mpi with validation disabled (--no-validate)
+
+- extracts metrics and appends them to a results table
+
+Defaults (configurable via environment variables):
+
+- ROWS_PER_RANK (default: 16384)
+
+- NNZ_PER_RANK (default: 1000000)
+
+Example:
+```
+export ROWS_PER_RANK=8192
+export NNZ_PER_RANK=500000
+bash script/weak.sh
+```
+
+
+Output:
+
+a compact table is written to:
+```
+results/weak.txt
+```
+___
+
+#### PBS templates (cluster)
+
+- **Single-run submission**: `script/spmv_mpi.sh` submits the PBS job `script/spmv_mpi.pbs` via `qsub`
+  (passing `NP`, `THREADS`, `MATRIX`, etc. as environment variables).
+
+- **Strong/Weak scaling**: the PBS scripts are the entry points on the cluster:
+    - `script/strong.pbs` loads modules and then calls `script/strong.sh`
+    - `script/weak.pbs` loads modules, sets weak-scaling parameters, and then calls `script/weak.sh`
+
+Examples (cluster):
+
+```bash
+qsub script/strong.pbs
+qsub script/weak.pbs
+```
+
+Note:
+
+when you use `qsub script/strong.pbs` make sure to have the matrix kron_g500-logn21.mtx in `bin/matrices`. If it is not present download it using `./bin/strong_matrix`
+
+___
+### Summary of executables
+
+| Executable | Description |
+|---|---|
+| **spmv_csr** | **D1** main executable: CSR SpMV with configurable OpenMP scheduling (`static`, `dynamic`, `guided`) |
+| **spmv_mpi** | **D2** main executable: distributed SpMV with **MPI ranks** + optional **OpenMP threads** per rank |
+| **make_matrices** | Generates the default benchmark matrices into `bin/matrices/` (supports `--k`, `--social`, `--web`) |
+| **custom_matrix** | Generates a custom random `.mtx` file: `custom_matrix <out> <rows> <cols> <nnz>` (output defaults to `bin/matrices/` if only a name is given) |
+| **strong_matrix** | Downloads the real-world strong-scaling matrix (`kron_g500-logn21.mtx`) into `bin/matrices/` |
+| **libmmio.a** | Static library for Matrix Market I/O (internal dependency, built from `mmio/`) |
 
 ---
 
 ## Notes
 
-* All executables must be run **from the project root or from inside `bin/`**, depending on paths.
-* Matrix Market files must reside in `bin/matrices/`.
-* For best performance, always compile in `Release` mode.
+- Input matrices must be in **Matrix Market (`.mtx`)** format and stored in:
+```
+bin/matrices/
+```
 
----
+- For best performance, always compile in **Release** mode (recommended: ` bash script/build.sh`).
+
+- Cluster runs:
+  - use `source script/env.sh` to load the correct modules
+  - for a single experiment use `bash script/spmv_mpi.sh ...` (submits `script/spmv_mpi.pbs`)
+  - for scaling runs the recommended entry points are:
+  ```bash
+  qsub script/strong.pbs
+  qsub script/weak.pbs
+  ```
+
+  - Strong scaling requires `kron_g500-logn21.mtx` in `bin/matrices/`.
+  If it is missing, download it with:
+```bash
+./bin/strong_matrix
+```
