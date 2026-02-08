@@ -57,11 +57,17 @@ for P in "${P_LIST[@]}"; do
 
 
   echo "[run] P=$P" >&2
+
+  MPI_EXTRA=()
+  if [[ -n "${PBS_NODEFILE:-}" ]]; then
+    MPI_EXTRA+=( --hostfile "$PBS_NODEFILE" --bind-to core --map-by slot )
+  else
+    MPI_EXTRA+=( --bind-to none --map-by slot --oversubscribe )
+  fi
+
   OUTRUN=$(
     mpirun -np "$P" \
-      --bind-to none \
-      --map-by slot \
-      --oversubscribe \
+      "${MPI_EXTRA[@]}" \
       "$EXE" "$mtx" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS" --no-validate
   )
 
