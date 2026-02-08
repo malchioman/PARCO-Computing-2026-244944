@@ -42,7 +42,7 @@ for P in "${P_LIST[@]}"; do
 
   OUTRUN=$(
     cd "$REPO_ROOT"
-    mpirun -np "$P" --bind-to none "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS"
+    mpirun -np "$P" --bind-to none "$EXE" "$MATRIX" "$THREADS" "$SCHED" "$CHUNK" "$REPEATS" "$TRIALS --no-validate"
   )
 
   p90_e2e=$(echo "$OUTRUN" | awk -F': ' '/P90 execution time/{print $2}' | awk '{print $1}' | tail -n1)
