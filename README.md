@@ -808,6 +808,10 @@ For this reason, a few output labels in the code are intentionally kept stable.
 
 - Scripts strong.sh and weak.sh should be executed only inside a PBS job
 (or an interactive allocation), not directly on the login node.
+- If scripts fail with “Permission denied”:
+```
+chmod +x script/*.sh
+```
 
 ___
 
