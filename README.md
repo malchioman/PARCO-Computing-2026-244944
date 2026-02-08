@@ -623,145 +623,204 @@ ___
 
 ### D2 helper scripts (`script/`)
 
-The repository includes helper scripts to reproduce the **D2 experiments** used in the report:
-- a generic MPI run (submitted via PBS)
-- strong scaling
-- weak scaling
+The repository provides a set of helper scripts to run and reproduce the
+distributed SpMV (D2) experiments on the UniTN HPC cluster.
+Scripts are organized following a clear separation between:
 
-All scripts assume:
-- the executable is `bin/spmv_mpi`
-- matrices are in `bin/matrices/`
-- results are written under `results/`
+- submission wrappers (executed on the login node), and
 
+- worker scripts (executed inside an allocated PBS job).
 
-> Note: some scripts parse specific lines from `spmv_mpi` output using `awk`.
-> For this reason, a few print lines in `spmv_mpi` are intentionally kept stable.
+Rule of thumb:
 
+- For a single MPI run → use script/spmv_mpi.sh
 
+- To reproduce the strong/weak scaling experiments of the report → use
+qsub script/strong.pbs and qsub script/weak.pbs
+
+- Scripts strong.sh and weak.sh are not meant to be run directly on the
+login node, but are invoked by the corresponding .pbs files.
 ---
+#### Quick start (reproduce report experiments)
 
-####  `script/spmv_mpi.sh` (PBS submission wrapper)
+From the login node:
+```bash
+source script/env.sh
+bash script/build.sh
+./bin/strong_matrix     # download kron_g500-logn21.mtx
+qsub script/strong.pbs
+qsub script/weak.pbs
+```
 
-This is the recommended way to run a **single MPI experiment on the cluster**.
-It requires `qsub` and submits `script/spmv_mpi.pbs`.
+Outputs are written to:
+
+- `results/strong.txt`
+
+- `results/weak.txt`
+
+PBS logs are stored in:
+
+- `logs/strong.out`
+
+- `logs/weak.out`
+
+___
+
+#### 1) Single-run submission wrapper
+
+`script/spmv_mpi.sh`
+
+This is the recommended entry point to run one MPI experiment on the cluster.
+It submits a PBS job using script/spmv_mpi.pbs.
 
 Usage:
-
-```bash
-bash script/spmv_mpi.sh <NP> <threads> <matrix.mtx> [sched] [chunk] [repeats] [trials] [flags...]
+```
+bash script/spmv_mpi.sh <NP> <THREADS> <matrix.mtx> [sched] [chunk] [repeats] [trials] [flags...]
 ```
 
 Example:
+```bash 
+script/spmv_mpi.sh 64 1 kron_g500-logn21.mtx static 64 10 5 --no-validate
 ```
-script/spmv_mpi.sh 64 2 kron_g500-logn21.mtx dynamic 64 10 5 --no-validate
+
+Key features:
+
+- automatically computes:
+
+  - number of nodes,
+
+  - MPI ranks per node (RPN),
+
+  - core allocation per rank (PE = THREADS);
+
+- submits a PBS job with proper resource requests;
+
+- uses core binding and rank placement:
+```
+--bind-to core
+--map-by ppr:RPN:node:PE=THREADS
 ```
 
-Important details:
 
-- the matrix must exist in bin/matrices/ (the script uses the basename of <matrix.mtx>)
-
-- defaults: QUEUE=short_cpuQ, WALLTIME=01:00:00, NCPUS_NODE=72
-
-- the script automatically computes how many nodes to request and how many MPI ranks per node to place (RPN)
-
-submission status is appended to a single master file:
+appends submission and execution status to a single master log:
 ```
 results/pbs_out/spmv_mpi.out
 ```
+
+>Note: the matrix must be located in bin/matrices/. Only the basename is used.
+
 ___
 
-####   `script/strong.sh` (strong scaling)
+#### 2) Strong scaling experiments
 
-Runs a strong-scaling sweep: fixed matrix, varying the number of MPI ranks.
+`script/strong.pbs` → `script/strong.sh`
+This pair of scripts reproduces the strong-scaling experiments used in the
+report.
 
-Usage:
+- Matrix: `kron_g500-logn21.mtx`
+
+- Sweep:
 ```
-bash script/strong.sh <matrix.mtx> [threads] [sched] [chunk] [repeats] [trials]
+P = {1, 2, 4, 8, 16, 32, 64, 128}
 ```
 
-Default rank list inside the script:
-```
-P_LIST=(1 2 4 8 16 32 64 128)
-```
+- Threads per rank: configurable (default: 1)
 
-Output:
-
-a compact table is written to:
+- Output:
 ```
 results/strong.txt
 ```
 
-Notes:
+Run with:
+```
+qsub script/strong.pbs
+```
 
-the script sets `MATRICES_DIR=bin/matrices` and runs `mpirun -np P --bind-to none` ...
+Details:
 
-it extracts P90 times (e2e/compute/comm), GFLOPS/BW, and comm/memory estimates from the program output
+- strong.pbs loads the required modules and executes strong.sh;
 
+- strong.sh performs the MPI sweep and parses the output of spmv_mpi
+  - using awk to extract:
+
+  - end-to-end P90 time,
+
+  - compute-only and communication-only P90 times,
+
+  - GFLOP/s and bandwidth,
+
+  - communication volume and memory footprint.
 ___
 
-####  `script/weak.sh` (weak scaling)
+#### 3) Weak scaling experiments
+`script/weak.pbs` → `script/weak.sh`
 
-Runs a weak-scaling sweep: matrix size grows with the number of MPI ranks.
+This pair of scripts reproduces the weak-scaling experiments used in the
+report.
 
-For each P in:
+For each MPI rank count:
 ```
-P_LIST=(1 2 4 8 16 32 64 128)
+P = {1, 2, 4, 8, 16, 32, 64, 128}
 ```
 
 the script:
 
-- generates (if missing) a matrix using bin/custom_matrix:
-  - rows = ROWS_PER_RANK * P
-
-  - cols = rows
-
-  - nnz = NNZ_PER_RANK * P
-
-- runs spmv_mpi with validation disabled (--no-validate)
-
-- extracts metrics and appends them to a results table
-
-Defaults (configurable via environment variables):
-
-- ROWS_PER_RANK (default: 16384)
-
-- NNZ_PER_RANK (default: 1000000)
-
-Example:
+- generates (if missing) a synthetic matrix using custom_matrix:
 ```
-export ROWS_PER_RANK=8192
-export NNZ_PER_RANK=500000
-bash script/weak.sh
+rows = ROWS_PER_RANK × P
+cols = rows
+nnz  = NNZ_PER_RANK × P
 ```
 
+- runs spmv_mpi with validation disabled (--no-validate);
+
+- collects performance and communication metrics.
+
+Default parameters (set in weak.pbs, overridable):
+
+- `ROWS_PER_RANK = 16384`
+
+- `NNZ_PER_RANK = 1000000`
+
+Run with:
+```
+qsub script/weak.pbs
+```
 
 Output:
-
-a compact table is written to:
 ```
 results/weak.txt
 ```
 ___
 
-#### PBS templates (cluster)
+#### Notes on reproducibility and script design
 
-- **Single-run submission**: `script/spmv_mpi.sh` submits the PBS job `script/spmv_mpi.pbs` via `qsub`
-  (passing `NP`, `THREADS`, `MATRIX`, etc. as environment variables).
+- All scripts assume:
 
-- **Strong/Weak scaling**: the PBS scripts are the entry points on the cluster:
-    - `script/strong.pbs` loads modules and then calls `script/strong.sh`
-    - `script/weak.pbs` loads modules, sets weak-scaling parameters, and then calls `script/weak.sh`
+  - executable: bin/spmv_mpi
 
-Examples (cluster):
+  - matrices: bin/matrices/
 
-```bash
-qsub script/strong.pbs
-qsub script/weak.pbs
-```
+  - outputs: results/
 
-Note:
+- Some scripts parse specific output lines from spmv_mpi using awk.
+For this reason, a few output labels in the code are intentionally kept stable.
 
-when you use `qsub script/strong.pbs` make sure to have the matrix kron_g500-logn21.mtx in `bin/matrices`. If it is not present download it using `./bin/strong_matrix`
+- Scripts strong.sh and weak.sh should be executed only inside a PBS job
+(or an interactive allocation), not directly on the login node.
+
+___
+
+#### Script overview
+
+| File | Type | Purpose |
+|------|------|---------|
+| `script/spmv_mpi.sh` | submission wrapper | Submit a **single MPI experiment** from the login node (computes nodes/RPN automatically and calls `spmv_mpi.pbs`) |
+| `script/spmv_mpi.pbs` | PBS template | PBS job executed by the submission wrapper; runs `spmv_mpi` with proper binding and placement |
+| `script/strong.pbs` | PBS entry point | Entry point for **strong-scaling experiments** used in the report |
+| `script/strong.sh` | worker script | Performs the MPI rank sweep for strong scaling and parses output into `results/strong.txt` |
+| `script/weak.pbs` | PBS entry point | Entry point for **weak-scaling experiments** used in the report |
+| `script/weak.sh` | worker script | Generates weak-scaling matrices, runs the sweep, and parses results into `results/weak.txt` |
 
 ___
 ### Summary of executables
