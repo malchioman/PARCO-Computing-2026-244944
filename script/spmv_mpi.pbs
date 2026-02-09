@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -q short_cpuQ
+#PBS -q shortCPUQ
 #PBS -N spmv_mpi
 #PBS -l walltime=01:00:00
 #PBS -j oe
