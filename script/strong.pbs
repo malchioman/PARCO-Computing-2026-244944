@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -q short_cpuQ
+#PBS -q shortCPUQ
 #PBS -N strong
 #PBS -l select=2:ncpus=72:mpiprocs=72
 #PBS -l walltime=00:30:00

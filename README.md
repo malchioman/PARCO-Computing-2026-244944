@@ -3,7 +3,7 @@
 
 # Distributed Sparse Matrix–Vector Multiplication (SpMV) — OpenMP (D1) and MPI+OpenMP (D2)
 
-
+>⚠️ All the scripts to set the environment are made for the hpc2 of the university of Trento, if you have a different system with different modules (check the code of `env.sh`) load the appropriate ones to cover the requirement one by one.
 ## Introduction
 
 This project contains the implementations used for the study:
@@ -717,7 +717,7 @@ ___
 This pair of scripts reproduces the strong-scaling experiments used in the
 report.
 
-- Matrix: `kron_g500-logn21.mtx`
+- Matrix: `kron_g500-logn21.mtx` (make sure you download it using `./bin/strong_matrix`)
 
 - Sweep:
 ```
