@@ -3,7 +3,10 @@
 
 # Distributed Sparse Matrix–Vector Multiplication (SpMV) — OpenMP (D1) and MPI+OpenMP (D2)
 
->⚠️ All the scripts to set the environment are made for the hpc2 of the university of Trento, if you have a different system with different modules (check the code of `env.sh`) load the appropriate ones to cover the requirement one by one.
+>⚠️ All the scripts were made for the UniTN HPC cluster (hpc2). If you have a different system with different modules (check `env.sh`), load the appropriate ones to cover the requirements.
+>
+> If your system does not provide the same short CPU queue used in the scripts, the D2 automation scripts may require edits (queue name/resources) and you may need to run experiments manually. Always allocate a sufficient number of nodes for the MPI ranks you plan to use when requesting resources.
+
 ## Introduction
 
 This project contains the implementations used for the study:
